@@ -1,0 +1,62 @@
+services:
+  traefik:
+    image: traefik:latest
+    ports:
+      - "8088:80"
+      - "8443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - app
+
+  database:
+    image: mysql:latest
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - database_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - app
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: ../enviropment/go/Dockerfile
+      args:
+        ENTRYPOINT_PATH: .
+        ENTRYPOINT_NAME: server
+        PORT: "8080"
+    environment:
+      PORT: "8080"
+      DATABASE_DSN: ${MYSQL_USER}:${MYSQL_PASSWORD}@tcp(database:3306)/${MYSQL_DATABASE}?parseTime=true&charset=utf8mb4
+    depends_on:
+      database:
+        condition: service_healthy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=desigram
+      - traefik.http.routers.backend.rule=Host(`desigram.localhost`)
+      - traefik.http.routers.backend.entrypoints=websecure
+      - traefik.http.routers.backend.tls=true
+      - traefik.http.services.backend.loadbalancer.server.port=8080
+    networks:
+      - app
+    restart: unless-stopped
+
+volumes:
+  database_data:
+
+networks:
+  app:
+    name: desigram
+    driver: bridge

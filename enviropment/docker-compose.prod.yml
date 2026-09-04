@@ -1,0 +1,25 @@
+services:
+  traefik:
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+
+      - --certificatesresolvers.le.acme.httpchallenge=true
+      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+      - --certificatesresolvers.le.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+    volumes:
+      - letsencrypt:/letsencrypt
+
+  backend:
+    labels:
+      - traefik.http.routers.backend.rule=Host(`api.desigram.com`)
+      - traefik.http.routers.backend.tls.certresolver=le
+
+volumes:
+  letsencrypt:
