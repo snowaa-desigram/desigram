@@ -46,6 +46,16 @@ services:
     ports:
       - "3307:3306"
 
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: ../enviropment/nextjs/Dockerfile.dev
+    volumes:
+      - ../frontend:/app
+      - /app/node_modules
+    environment:
+      NEXT_PUBLIC_API_URL: https://api.desigram.localhost:8443
+
   jaeger:
     image: jaegertracing/jaeger:latest
     environment:
