@@ -1,3 +1,6 @@
 [submodule "enviropment"]
 	path = enviropment
 	url = git@github.com:selyusize/environment.git
+[submodule "frontend"]
+	path = frontend
+	url = git@github.com:selyusize/desigram-frontend.git
