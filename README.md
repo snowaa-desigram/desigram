@@ -11,12 +11,12 @@ make dev
 
 ## Ссылки
 
-| Название | Ссылка | Зачем |
-|---|---|---|
-| Echo (Go) | https://desigram.localhost:8443 | Тестовый сервер: повторяет запрос. `/health` — жив ли процесс |
-| Traefik | https://traefik.desigram.localhost:8443/dashboard/ | Входной прокси: кто куда идёт, HTTPS, список сервисов |
-| Grafana | https://grafana.desigram.localhost:8443 | Графики. Логин `admin` / `admin` |
-| Prometheus | https://prometheus.desigram.localhost:8443 | Счётчики запросов, статусы целей |
-| Jaeger | https://jaeger.desigram.localhost:8443 | Трассы: как запрос прошёл через Traefik |
+| Название   | Ссылка                                               | Зачем                                                         |
+| ---------- | ---------------------------------------------------- | ------------------------------------------------------------- |
+| Echo (Go)  | <https://desigram.localhost:8443>                    | Тестовый сервер: повторяет запрос. `/health` — жив ли процесс |
+| Traefik    | <https://traefik.desigram.localhost:8443/dashboard/> | Входной прокси: кто куда идёт, HTTPS, список сервисов         |
+| Grafana    | <https://grafana.desigram.localhost:8443>            | Графики. Логин `admin` / `admin`                              |
+| Prometheus | <https://prometheus.desigram.localhost:8443>         | Счётчики запросов, статусы целей                              |
+| Jaeger     | <https://jaeger.desigram.localhost:8443>             | Трассы: как запрос прошёл через Traefik                       |
 
 MySQL с Mac: `127.0.0.1:3307`. Пользователь и пароль в `enviropment/.env`.
