@@ -1,6 +1,9 @@
 [submodule "enviropment"]
 	path = enviropment
-	url = git@github.com:selyusize/environment.git
+	url = git@github.com:snowaa-desigram/env.git
 [submodule "frontend"]
 	path = frontend
-	url = git@github.com:selyusize/desigram-frontend.git
+	url = git@github.com:snowaa-desigram/front.git
+[submodule "backend"]
+	path = backend
+	url = git@github.com:snowaa-desigram/backend.git
