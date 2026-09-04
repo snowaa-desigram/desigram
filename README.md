@@ -3,7 +3,7 @@
 Локально всё на HTTPS, порт **8443** (80 и 443 заняты другим Docker).
 
 ```bash
-make cert DOMAINS="desigram.localhost traefik.desigram.localhost grafana.desigram.localhost prometheus.desigram.localhost jaeger.desigram.localhost"
+make cert DOMAINS="desigram.localhost api.desigram.localhost traefik.desigram.localhost grafana.desigram.localhost prometheus.desigram.localhost jaeger.desigram.localhost"
 make dev
 ```
 
@@ -13,7 +13,8 @@ make dev
 
 | Название   | Ссылка                                               | Зачем                                                         |
 | ---------- | ---------------------------------------------------- | ------------------------------------------------------------- |
-| Echo (Go)  | <https://desigram.localhost:8443>                    | Тестовый сервер: повторяет запрос. `/health` — жив ли процесс |
+| Next.js    | <https://desigram.localhost:8443>                    | Сайт. В проде — `https://desigram.com`                        |
+| Echo (Go)  | <https://api.desigram.localhost:8443>                | API. `/health` — жив ли процесс. В проде — `api.desigram.com` |
 | Traefik    | <https://traefik.desigram.localhost:8443/dashboard/> | Входной прокси: кто куда идёт, HTTPS, список сервисов         |
 | Grafana    | <https://grafana.desigram.localhost:8443>            | Графики. Логин `admin` / `admin`                              |
 | Prometheus | <https://prometheus.desigram.localhost:8443>         | Счётчики запросов, статусы целей                              |
