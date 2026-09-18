@@ -143,6 +143,7 @@ cat > "$ENV/services/$NAME.yml" <<YML
 # Go gRPC-микросервис: $NAME (внутренний, без Traefik)
 services:
   $NAME:
+    image: desigram/$NAME
     build:
       context: ../../backend/services/go
       dockerfile: ../../../enviropment/go/Dockerfile
