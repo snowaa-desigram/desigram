@@ -47,9 +47,13 @@ jobs:
 
       - run: ./scripts/e2e.sh
 
-      - name: Logs on failure
+      - name: Diagnostics on failure
         if: failure()
-        run: $COMPOSE logs --tail 200
+        run: |
+          echo "::group::docker compose ps -a"; $COMPOSE ps -a; echo "::endgroup::"
+          for s in core-worker core ping telegram rabbitmq; do
+            echo "::group::logs $s"; $COMPOSE logs --tail 100 $s; echo "::endgroup::"
+          done
 
       - if: always()
         run: $COMPOSE down -v
