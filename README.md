@@ -60,6 +60,9 @@ enviropment/             # git submodule
   php/ go/ python/ nextjs/ buf/  # Dockerfile'ы (buf — тулчейн генерации)
 frontend/                # git submodule (Next.js)
 scripts/new-service.sh   # генератор микросервиса
+scripts/e2e.sh           # сквозная проверка поднятого стека
+tests/load/api.js        # k6-сценарий «200 онлайн»
+.github/workflows/       # e2e.yml (стек из сабмодулей), load.yml (k6)
 ```
 
 ## Единая точка настройки
@@ -135,6 +138,24 @@ make new-service NAME=media
 
 Python-сервис: скопировать `services/python/telegram/`, добавить в `members` корневого `pyproject.toml`,
 `uv lock`, создать `enviropment/services/<name>.yml` по образцу `telegram.yml` (`args.SERVICE: <name>`).
+
+## Тесты и CI
+
+«Сломает ли мой код что-нибудь» отвечают слои, каждый ловит свой класс поломок. Всё гоняется на PR в GitHub Actions и локально теми же командами.
+
+| Слой | Ловит | Где | Локально |
+| --- | --- | --- | --- |
+| Контракты | несовместимое изменение proto | `backend` ci → `proto` (buf lint/format/breaking против `main`) | `make proto-lint`, `make proto-breaking` |
+| Архитектура | нарушение слоёв DDD, запрещённые импорты | deptrac (PHP), depguard в golangci-lint (Go) | `make core-lint`, `golangci-lint run` |
+| Статика | типы, стиль | phpstan 8 + cs-fixer, `go vet` + golangci-lint, ruff | `make test` |
+| Unit / интеграция | логика хендлеров; HTTP → шина → хендлер с in-memory портами (gRPC подменён, кеш — array) | `backend` ci → `php`/`go`/`python` | `make test` |
+| Окружение | compose dev/prod, Dockerfile'ы (hadolint), Ansible (syntax + lint + рендер `.env`) | `enviropment` ci | `docker compose config` |
+| E2E | HTTP → core → gRPC → Go/Python → RabbitMQ → worker | корень, `e2e.yml` (push в `main`, вручную) | `make dev && make e2e` |
+| Нагрузка | p95/p99, доля ошибок при 200 VU; пороги в скрипте — вышли за них = красный job | корень, `load.yml` (кнопка / cron) | `make load TARGET=…` |
+
+Тестовые подмены внешних сервисов — `core/tests/Fake/*`, подключаются в `when@test` в `config/services.yaml`: новый порт → новый фейк там же.
+
+E2E в CI собирает образы через `docker buildx bake` с GHA-кешем: первый прогон долгий (grpc-расширение), дальше минуты. Для приватных сабмодулей нужен secret `SUBMODULES_TOKEN` (PAT с `repo`). k6 умеет слать метрики в Prometheus стека metrika — secret `K6_PROMETHEUS_RW_SERVER_URL`.
 
 ## Нагрузка
 

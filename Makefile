@@ -5,7 +5,7 @@ BUF_IMG = desigram/buf
 BUF     = docker run --rm -v "$(CURDIR)/backend":/workspace $(BUF_IMG)
 ANSIBLE = cd enviropment/ansible && ansible-playbook
 
-.PHONY: cert configure dev prod deploy stop down logs ps proto proto-lint proto-breaking new-service core-sh core-console core-lint core-test
+.PHONY: cert configure dev prod deploy stop down logs ps proto proto-lint proto-breaking new-service core-sh core-console core-lint core-test test e2e load
 
 buf-image:            ## собрать образ генерации (buf + плагины)
 	docker build -q -t $(BUF_IMG) enviropment/buf
@@ -67,3 +67,17 @@ core-lint:
 
 core-test:
 	$(DEV) exec core composer test
+
+# --- тесты ---
+test:                 ## unit/интеграционные тесты всех сервисов (то же, что CI backend)
+	$(DEV) exec core composer lint && $(DEV) exec core composer test
+	cd backend/services/go && go vet ./... && go test ./...
+	docker run --rm -v "$(CURDIR)/backend/services/python":/app -w /app ghcr.io/astral-sh/uv:python3.13-bookworm-slim \
+		sh -c "uv sync --frozen --all-packages -q && uv run --no-sync ruff check . && uv run --no-sync pytest -q"
+
+e2e:                  ## сквозная проверка поднятого стека (make dev перед этим)
+	./scripts/e2e.sh
+
+load:                 ## k6, 200 VU: make load TARGET=https://api.desigram.localhost:8443
+	docker run --rm -i --network host -e TARGET=$(or $(TARGET),https://api.desigram.localhost:8443) \
+		-v "$(CURDIR)/tests/load":/scripts grafana/k6:latest run /scripts/api.js

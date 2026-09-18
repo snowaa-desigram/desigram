@@ -1,0 +1,28 @@
+# Нагрузочный тест k6 против staging/prod-URL. По кнопке (workflow_dispatch) или по расписанию.
+name: load
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Базовый URL API (например https://api.desigram.com)"
+        required: true
+        default: https://api.desigram.com
+  # schedule:
+  #   - cron: "0 4 * * 1"   # понедельник 04:00 UTC
+
+jobs:
+  k6:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: grafana/setup-k6-action@v1
+      - uses: grafana/run-k6-action@v1
+        env:
+          TARGET: ${{ inputs.target }}
+          # метрики k6 в Prometheus стека metrika (если задан secret):
+          K6_PROMETHEUS_RW_SERVER_URL: ${{ secrets.K6_PROMETHEUS_RW_SERVER_URL }}
+        with:
+          path: tests/load/api.js
+          flags: ${{ secrets.K6_PROMETHEUS_RW_SERVER_URL && '-o experimental-prometheus-rw' || '' }}
