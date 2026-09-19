@@ -115,45 +115,96 @@ make configure          # group_vars -> enviropment/.env (локально)
 make deploy             # prod-серверы из inventory: docker + git clone + compose up
 ```
 
-## Локально
+## Как пользоваться (локально)
 
-HTTPS на порту **8443** (80/443 заняты другим Docker).
+Стек живёт в Docker за Traefik на **https://\*.desigram.localhost:8443** (80/443 заняты другим Docker). Всё, что ниже, — с нуля до работающего стека.
+
+### 1. Что нужно на машине
+
+- Docker Desktop, в Settings → Resources → **Memory ≥ 8 ГБ** (сборка grpc-расширения для PHP; при 16 ГБ можно ускорить, см. ниже)
+- `mkcert` (`brew install mkcert`) — локальные HTTPS-сертификаты, которым доверяет браузер
+- `ansible-playbook` (`brew install ansible`) — рендерит `.env` из group_vars
+- `jq`, `curl` — для `make e2e`
+- Go / PHP / Node — не обязательны: всё собирается в контейнерах; нужны только для запуска тестов на хосте
+
+### 2. Первый запуск
 
 ```bash
-make configure          # group_vars -> enviropment/.env
-make cert               # mkcert на <domain> и все поддомены из .env
-make dev                # = make configure + compose up --build
+git clone --recurse-submodules git@github.com:snowaa-desigram/desigram.git && cd desigram
+make configure   # group_vars -> enviropment/.env
+make cert        # mkcert -install (один раз, спросит пароль) + сертификат на все хосты из .env
+make dev         # сборка образов + compose up
 ```
 
-Первая сборка `core` долгая: расширения `grpc`/`protobuf` компилируются из исходников (20–30 мин; `amqp`, `redis` и прочие — быстро), дальше — из кеша. grpc намеренно собирается в 2 потока (`GRPC_BUILD_JOBS` в `php/Dockerfile`): на `-j10` компиляция C++ съедает больше 8 ГБ и Docker Desktop падает с `cannot allocate memory`. Если памяти в Docker ≥ 16 ГБ — `docker compose -f enviropment/docker-compose.yml build --build-arg GRPC_BUILD_JOBS=6 core` ускорит. Если pecl отвалился по сети — просто повторить `make dev`.
+Первая сборка `core` — 20–30 мин: `grpc`/`protobuf` компилируются из исходников, намеренно в 2 потока (`GRPC_BUILD_JOBS` в `php/Dockerfile`), потому что на `-j10` C++ съедает больше 8 ГБ и Docker падает с `cannot allocate memory`. Дальше слой в кеше. С 16 ГБ памяти: `docker compose -f enviropment/docker-compose.yml build --build-arg GRPC_BUILD_JOBS=6 core`.
 
-Ниже — для `domain: desigram.localhost` (дефолт `local.yml`):
+Когда `make dev` закончился без ошибок — `make e2e`: 19 проверок по всей цепочке (core → gRPC → Go/Python → RabbitMQ → worker; auth: регистрация → код из Mailpit → токены → `/api/me` в core). Все ✔ — стек рабочий.
+
+### 3. Где что
+
+Для `domain: desigram.localhost` (дефолт `local.yml`; сменил домен — все адреса ниже меняются вместе с ним):
 
 | Что        | Где                                          |
 | ---------- | -------------------------------------------- |
 | Сайт       | https://desigram.localhost:8443              |
 | API        | https://api.desigram.localhost:8443/api/ping |
-| Auth       | https://api.desigram.localhost:8443/api/auth/* (напрямую: 127.0.0.1:8090) |
-| Почта (dev)| https://mail.desigram.localhost:8443 (Mailpit: сюда падают коды подтверждения) |
+| Auth       | https://api.desigram.localhost:8443/api/auth/* (напрямую, без Traefik: http://127.0.0.1:8090) |
+| Почта (dev)| https://mail.desigram.localhost:8443 — Mailpit: сюда падают все письма (коды подтверждения) |
 | Профайлер  | https://api.desigram.localhost:8443/_profiler |
-| Traefik    | https://traefik.desigram.localhost:8443/dashboard/ |
-| Grafana    | https://grafana.desigram.localhost:8443 (admin/admin), дашборд Auth — из provisioning |
+| Traefik    | https://traefik.desigram.localhost:8443/dashboard/ — роутеры, здоровье бэкендов |
+| Grafana    | https://grafana.desigram.localhost:8443 (admin/admin), дашборд **Auth** уже на месте |
 | Prometheus | https://prometheus.desigram.localhost:8443   |
-| Jaeger     | https://jaeger.desigram.localhost:8443       |
+| Jaeger     | https://jaeger.desigram.localhost:8443 — трейсы core → gRPC, auth |
 | RabbitMQ   | https://rabbitmq.desigram.localhost:8443 (desigram/desigram), AMQP 127.0.0.1:5673 |
-| MySQL      | 127.0.0.1:3307                               |
+| MySQL      | 127.0.0.1:3307 (desigram/desigram)           |
 | Redis      | 127.0.0.1:6380                               |
 | gRPC ping / telegram | 127.0.0.1:50051 / 50052            |
 
+### 4. Проверить auth руками
+
 ```bash
-make logs S=core        # логи
+API=https://api.desigram.localhost:8443/api/auth
+curl -s -X POST $API/register -H 'Content-Type: application/json' -d '{"email":"me@example.com","password":"password-123"}'
+# → 202; код — в https://mail.desigram.localhost:8443 (или: curl -s http://127.0.0.1:8025/api/v1/messages | jq)
+curl -s -X POST $API/register/confirm -H 'Content-Type: application/json' -d '{"email":"me@example.com","code":"123456"}'
+# → {"accessToken":"…","refreshToken":"…","expiresIn":900}
+curl -s https://api.desigram.localhost:8443/api/me -H "Authorization: Bearer <accessToken>"
+# → {"id":"…","email":"me@example.com"}   (core проверил JWT от auth)
+```
+
+### 5. Каждый день
+
+```bash
+make dev                # поднять/пересобрать (только изменившиеся слои)
+make ps                 # состояние контейнеров
+make logs S=auth        # логи сервиса (core, auth, frontend, telegram, ping, …)
+make stop / make down   # остановить / снести контейнеры (volume'ы остаются)
+make e2e                # сквозная проверка
+make test               # unit/интеграционные тесты всех языков (то, что гоняет CI)
 make core-console C="debug:router"
 make core-lint          # cs-fixer + phpstan + deptrac
-make core-test
 XDEBUG_MODE=debug make dev   # xdebug -> IDE на 9003
 ```
 
+Код `core` и `frontend` монтируется volume'ом — правки видны сразу, пересборка не нужна. Go и Python — пересборка образа (`make dev`).
+
 Отладка в core: web-profiler (`/_profiler`), debug-bundle (`dump()`), monolog, xdebug, maker-bundle (`bin/console make:*`).
+
+### 6. Если что-то не так
+
+| Симптом | Причина | Что делать |
+| --- | --- | --- |
+| Браузер: `ERR_CERT_AUTHORITY_INVALID` / `NET::ERR_CERT_COMMON_NAME_INVALID` на каком-то хосте | сертификат сделан раньше, чем хост появился в списке (Traefik подставляет свой default cert) | `make cert` — перевыпустит на все хосты из `.env` и перезапустит Traefik |
+| `make dev`: `Bind for 0.0.0.0:<port> failed: port is already allocated` | порт занят другим Docker-проектом | поменять порт в `enviropment/docker-compose.dev.yml` (только dev-проброс, на Traefik не влияет) |
+| `auth-migrate` / `core`: `Access denied for user 'desigram'` | volume MySQL создан с другими паролями — MySQL читает `MYSQL_*` только при первом старте | `docker compose … rm -sf database auth-migrate auth core core-worker && docker volume rm enviropment_database_data && make dev` (данные dev-БД теряются) |
+| Сборка `core`: `cannot allocate memory` | мало памяти в Docker Desktop | поднять Memory; `GRPC_BUILD_JOBS` оставить 2 |
+| `TLS handshake timeout` / `EOF` при `load metadata` | сеть до registry | повторить `make dev` — слои кешируются |
+| Grafana `Exited (1)`, `Datasource provisioning error` | старый volume `grafana_data` | уже обработано (`deleteDatasources`); если повторится — `docker volume rm enviropment_grafana_data` |
+| Frontend `Restarting` с `ERR_PNPM_…` | `node_modules` в контейнере разошёлся с lock'ом | `docker compose … up -d --force-recreate -V frontend` (пересоздать anonymous volume) |
+| 503/504 через Traefik сразу после `make dev` | бэкенд ещё не прошёл healthcheck | подождать 10–20 с; https://traefik.desigram.localhost:8443/dashboard/ → Services покажет `UP` |
+| Полный сброс | — | `make down && docker volume rm $(docker volume ls -q \| grep ^enviropment_) && make dev` |
+
+`docker compose …` здесь = `docker compose -f enviropment/docker-compose.yml -f enviropment/docker-compose.dev.yml`.
 
 ## Контракты
 

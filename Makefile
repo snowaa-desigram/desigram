@@ -20,8 +20,9 @@ buf-image:            ## собрать образ генерации (buf + п�
 	docker build -q -t $(BUF_IMG) enviropment/buf
 
 # --- окружение (единая точка настройки: enviropment/ansible/inventory/group_vars) ---
-cert:                 ## mkcert на все хосты домена из .env (или DOMAINS="a b c")
+cert:                 ## mkcert на все хосты домена из .env (или DOMAINS="a b c"); traefik перечитывает pem только при рестарте
 	./enviropment/certificate/install.sh $(DOMAINS)
+	@$(DEV) ps --status running -q traefik 2>/dev/null | grep -q . && $(DEV) restart traefik || true
 
 configure:            ## сгенерировать enviropment/.env из group_vars
 	$(ANSIBLE) playbooks/configure.yml -l local
