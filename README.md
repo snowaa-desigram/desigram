@@ -125,7 +125,7 @@ make cert               # mkcert на <domain> и все поддомены из
 make dev                # = make configure + compose up --build
 ```
 
-Первая сборка `core` долгая: расширения `grpc`/`protobuf` компилируются из исходников (20+ мин; `amqp`, `redis` и прочие — быстро), дальше — из кеша. Если pecl отвалился по сети — просто повторить `make dev`.
+Первая сборка `core` долгая: расширения `grpc`/`protobuf` компилируются из исходников (20–30 мин; `amqp`, `redis` и прочие — быстро), дальше — из кеша. grpc намеренно собирается в 2 потока (`GRPC_BUILD_JOBS` в `php/Dockerfile`): на `-j10` компиляция C++ съедает больше 8 ГБ и Docker Desktop падает с `cannot allocate memory`. Если памяти в Docker ≥ 16 ГБ — `docker compose -f enviropment/docker-compose.yml build --build-arg GRPC_BUILD_JOBS=6 core` ускорит. Если pecl отвалился по сети — просто повторить `make dev`.
 
 Ниже — для `domain: desigram.localhost` (дефолт `local.yml`):
 
