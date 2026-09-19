@@ -133,7 +133,7 @@ make dev                # = make configure + compose up --build
 | ---------- | -------------------------------------------- |
 | Сайт       | https://desigram.localhost:8443              |
 | API        | https://api.desigram.localhost:8443/api/ping |
-| Auth       | https://api.desigram.localhost:8443/api/auth/* (напрямую: 127.0.0.1:8081) |
+| Auth       | https://api.desigram.localhost:8443/api/auth/* (напрямую: 127.0.0.1:8090) |
 | Почта (dev)| https://mail.desigram.localhost:8443 (Mailpit: сюда падают коды подтверждения) |
 | Профайлер  | https://api.desigram.localhost:8443/_profiler |
 | Traefik    | https://traefik.desigram.localhost:8443/dashboard/ |
