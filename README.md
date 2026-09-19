@@ -89,6 +89,27 @@ tests/load/api.js        # k6-сценарий «200 онлайн»
 `enviropment/ansible/inventory/group_vars/{all,local,prod}.yml`. Секреты — `ansible-vault`
 (`vault.yml.example`). Из них Ansible генерирует `enviropment/.env`, который читает compose.
 
+### Имя проекта и домен
+
+Три переменные в `group_vars/all.yml` (домен — в `local.yml`/`prod.yml`), больше нигде ничего менять не нужно:
+
+| Переменная | Что задаёт | Куда доезжает |
+| --- | --- | --- |
+| `domain` | домен | Traefik-роутеры (`api.`, `traefik.`, `grafana.`, …, `mail.`), `PUBLIC_API_URL`, CORS в core, `SMTP_FROM`, ACME-email, `make cert`, `make load` |
+| `app_name` | имя продукта для людей | тема писем auth (`APP_NAME`), `NEXT_PUBLIC_APP_NAME` во фронте |
+| `project_name` | техническое имя | docker-сеть, имена образов `<project_name>/core`, папка деплоя `/opt/<project_name>`, `make new-service` |
+
+```bash
+# пример переезда на gram-designer.com
+#   all.yml:   project_name: gramdesigner   app_name: Gram Designer
+#   prod.yml:  domain: gram-designer.com
+#   local.yml: domain: gram-designer.localhost
+make configure && make cert && make dev
+```
+
+Что не переименовывается автоматически (и не должно): Go-модуль `github.com/snowaa-desigram/...`, proto-пакеты `desigram.*.v1`,
+PHP-namespace `Desigram\` в gen, `desigram-common` в Python, issuer JWT `desigram-auth` — это внутренние идентификаторы кода, пользователь их не видит.
+
 ```bash
 make configure          # group_vars -> enviropment/.env (локально)
 make deploy             # prod-серверы из inventory: docker + git clone + compose up
@@ -99,11 +120,14 @@ make deploy             # prod-серверы из inventory: docker + git clone
 HTTPS на порту **8443** (80/443 заняты другим Docker).
 
 ```bash
-make cert DOMAINS="desigram.localhost api.desigram.localhost traefik.desigram.localhost grafana.desigram.localhost prometheus.desigram.localhost jaeger.desigram.localhost rabbitmq.desigram.localhost mail.desigram.localhost"
+make configure          # group_vars -> enviropment/.env
+make cert               # mkcert на <domain> и все поддомены из .env
 make dev                # = make configure + compose up --build
 ```
 
 Первая сборка `core` долгая: расширения `grpc`/`protobuf` компилируются из исходников (20+ мин; `amqp`, `redis` и прочие — быстро), дальше — из кеша. Если pecl отвалился по сети — просто повторить `make dev`.
+
+Ниже — для `domain: desigram.localhost` (дефолт `local.yml`):
 
 | Что        | Где                                          |
 | ---------- | -------------------------------------------- |
@@ -198,7 +222,7 @@ Python-сервис: скопировать `services/python/telegram/`, доб�
 | Unit / интеграция | логика хендлеров; HTTP → шина → хендлер с in-memory портами (gRPC подменён, кеш — array); ядро core: публикация событий из `save()`, `EventBus` → подписчик, формат ошибок `ApiExceptionListener`, `GrpcGateway`; auth: service/handler на in-memory хранилищах, ответы сверяются со схемами OpenAPI, контрактные тесты хранилищ (miniredis; GORM — на MySQL из CI, локально `AUTH_TEST_MYSQL_DSN`) | `backend` ci → `php`/`go`/`python` | `make test` |
 | Окружение | compose dev/prod, Dockerfile'ы (hadolint), Ansible (syntax + lint + рендер `.env`) | `enviropment` ci | `docker compose config` |
 | E2E | HTTP → core → gRPC → Go/Python → RabbitMQ → worker; auth: register → код из Mailpit → confirm → refresh → reset → logout → `GET /api/me` в core | корень, `e2e.yml` (push в `main`, вручную) | `make dev && make e2e` |
-| Нагрузка | p95/p99, доля ошибок при 200 VU; пороги в скрипте — вышли за них = красный job | корень, `load.yml` (кнопка / cron) | `make load TARGET=…` |
+| Нагрузка | p95/p99, доля ошибок при 200 VU; пороги в скрипте — вышли за них = красный job | корень, `load.yml` (кнопка / cron) | `make load` (цель — `PUBLIC_API_URL` из `.env`) |
 
 Тестовые подмены внешних сервисов — `core/tests/Fake/*`, подключаются в `when@test` в `config/services.yaml`: новый порт → новый фейк там же.
 

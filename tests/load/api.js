@@ -1,4 +1,4 @@
-// k6: «200 человек онлайн». Запуск: make load TARGET=https://api.desigram.localhost:8443
+// k6: «200 человек онлайн». Запуск: make load [TARGET=https://api.<domain>]
 // Пороги ниже — критерий прохождения: job падает, если p95 или доля ошибок вышли за них.
 import http from 'k6/http';
 import { check, sleep } from 'k6';

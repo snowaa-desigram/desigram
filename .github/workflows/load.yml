@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: "Базовый URL API (например https://api.desigram.com)"
+        description: "Базовый URL API (https://api.<domain>)"
         required: true
         default: https://api.desigram.com
   # schedule:

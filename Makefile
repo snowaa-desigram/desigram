@@ -1,7 +1,15 @@
 COMPOSE = docker compose -f enviropment/docker-compose.yml
 DEV     = $(COMPOSE) -f enviropment/docker-compose.dev.yml
 PROD    = $(COMPOSE) -f enviropment/docker-compose.prod.yml
-BUF_IMG = desigram/buf
+# Домен/имя проекта — из enviropment/.env (генерируется make configure из group_vars); до configure — дефолты
+ENV_FILE = enviropment/.env
+env      = $(or $(shell test -f $(ENV_FILE) && sed -n 's/^$(1)=//p' $(ENV_FILE) | tr -d '"'),$(2))
+DOMAIN   = $(call env,DOMAIN,desigram.localhost)
+PROJECT  = $(call env,PROJECT_NAME,desigram)
+API_URL  = $(call env,PUBLIC_API_URL,https://api.$(DOMAIN):8443)
+# все хосты за Traefik — для mkcert
+DOMAINS ?= $(DOMAIN) $(addsuffix .$(DOMAIN),api traefik grafana prometheus jaeger rabbitmq mail)
+BUF_IMG = $(PROJECT)/buf
 BUF     = docker run --rm -v "$(CURDIR)/backend":/workspace $(BUF_IMG)
 ANSIBLE = cd enviropment/ansible && ansible-playbook
 OAPI_CODEGEN = go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.8.0
@@ -12,7 +20,7 @@ buf-image:            ## собрать образ генерации (buf + п�
 	docker build -q -t $(BUF_IMG) enviropment/buf
 
 # --- окружение (единая точка настройки: enviropment/ansible/inventory/group_vars) ---
-cert:
+cert:                 ## mkcert на все хосты домена из .env (или DOMAINS="a b c")
 	./enviropment/certificate/install.sh $(DOMAINS)
 
 configure:            ## сгенерировать enviropment/.env из group_vars
@@ -84,6 +92,6 @@ test:                 ## unit/интеграционные тесты всех �
 e2e:                  ## сквозная проверка поднятого стека (make dev перед этим)
 	./scripts/e2e.sh
 
-load:                 ## k6, 200 VU: make load TARGET=https://api.desigram.localhost:8443
-	docker run --rm -i --network host -e TARGET=$(or $(TARGET),https://api.desigram.localhost:8443) \
+load:                 ## k6, 200 VU: make load [TARGET=https://api.<domain>]
+	docker run --rm -i --network host -e TARGET=$(or $(TARGET),$(API_URL)) \
 		-v "$(CURDIR)/tests/load":/scripts grafana/k6:latest run /scripts/api.js

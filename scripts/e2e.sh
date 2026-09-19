@@ -6,7 +6,8 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEV="docker compose -f $ROOT/enviropment/docker-compose.yml -f $ROOT/enviropment/docker-compose.dev.yml"
 CORE="$DEV exec -T core"
-GRPCURL="docker run --rm --network desigram fullstorydev/grpcurl:latest -plaintext"
+NETWORK="$(sed -n 's/^PROJECT_NAME=//p' "$ROOT/enviropment/.env" 2>/dev/null | tr -d '"')"
+GRPCURL="docker run --rm --network ${NETWORK:-desigram} fullstorydev/grpcurl:latest -plaintext"
 
 pass=0; fail=0
 check() {
