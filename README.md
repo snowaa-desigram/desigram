@@ -49,6 +49,17 @@ Presentation (PingController)
 
 Слои проверяет `deptrac` (`Domain ← Application ← Infrastructure/Presentation`), типы — `phpstan` (level 8), стиль — `php-cs-fixer`.
 
+### Ядро core: четыре правила (ADR)
+
+| Правило | Где | Как проверяется |
+| --- | --- | --- |
+| **Команды/запросы** — только через `CommandBus`/`QueryBus`; хендлер помечен `CommandHandler`/`QueryHandler` | `Shared/Application/Bus` | `_instanceof` в `services.yaml` |
+| **События** — агрегат делает `record()`, `CachedRepository::save()` публикует их в `EventBus` после flush; подписчик = класс с `EventSubscriber` + `__invoke(Event)`. **Межконтекстная связь — только события**: контекст A не импортирует контекст B | `Shared/Application/Event`, `Shared/Infrastructure/Bus/MessengerEventBus` | `tests/Architecture/ContextIsolationTest` |
+| **Ошибки API** — бросай наследника `ApplicationException` (`NotFound`, `ValidationFailed`, `Forbidden`, `Conflict`, `ExternalServiceUnavailable`); `ApiExceptionListener` превращает любое исключение под `/api` в `{code, message, details?}` — та же схема `Error`, что у auth (`backend/openapi/common.yaml`) | `Shared/Application/Exception`, `Shared/Presentation/Http` | `ApiExceptionListenerTest` |
+| **gRPC-адаптеры** наследуют `GrpcGateway`: `$this->call(fn () => $client->Rpc($req, [], self::callOptions())->wait())` — таймаут, статус, `ExternalServiceUnavailable` в одном месте | `Shared/Infrastructure/Grpc` | `GrpcGatewayTest`; `make new-service` генерирует адаптер |
+
+Чего в `Shared` намеренно нет: фабрик репозиториев, декораторов кеша, transactional outbox (`dispatch_after_current_bus` откладывает async-события до коммита), Event Sourcing. Появление класса с суффиксом `Factory`/`Visitor`/`Strategy` — повод для вопроса «зачем» на ревью.
+
 ## Структура
 
 ```
@@ -170,8 +181,8 @@ make new-service NAME=media
 ```
 
 Создаёт proto-контракт, Go-код (`cmd/media/{main.go,etc/media.yaml}`, `internal/media/{config,server}.go`), `enviropment/services/media.yml`,
-подключает его в compose и Prometheus, добавляет `MEDIA_GRPC_ADDR` и `MEDIA_REPLICAS` в настройки, генерирует код.
-Остаётся описать RPC в proto и написать порт + gRPC-адаптер в core (пример — контекст `Ping`).
+подключает его в compose и Prometheus, добавляет `MEDIA_GRPC_ADDR` и `MEDIA_REPLICAS` в настройки, в core — порт `Media/Application/Port/MediaGateway`,
+адаптер `Infrastructure/Grpc/GrpcMediaGateway` (на `GrpcGateway`) и фейк в `tests/Fake`, генерирует код. Остаётся описать реальные RPC.
 
 Python-сервис: скопировать `services/python/telegram/`, добавить в `members` корневого `pyproject.toml`,
 `uv lock`, создать `enviropment/services/<name>.yml` по образцу `telegram.yml` (`args.SERVICE: <name>`).

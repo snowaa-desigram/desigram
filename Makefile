@@ -55,6 +55,7 @@ proto-breaking:       ## что сломалось в контрактах от�
 
 # --- HTTP-контракты: backend/openapi -> Go-типы (фронт: openapi-typescript) ---
 openapi:
+	cd backend/services/go && $(OAPI_CODEGEN) -config oapi-codegen.common.yaml ../../openapi/common.yaml
 	cd backend/services/go && $(OAPI_CODEGEN) -config oapi-codegen.yaml ../../openapi/auth.yaml
 
 new-service:          ## make new-service NAME=media

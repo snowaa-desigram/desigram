@@ -162,6 +162,79 @@ YML
 perl -0pi -e "s|(include:\n(?:  - path: services/.*\n)*)|\$1  - path: services/$NAME.yml\n|" "$ENV/docker-compose.yml"
 perl -0pi -e "s|(      TELEGRAM_GRPC_ADDR: telegram:50051\n)|\$1      ${UPPER}_GRPC_ADDR: $NAME:50051\n|" "$ENV/docker-compose.yml"
 
+# ---------- core: порт + gRPC-адаптер (GrpcGateway) + фейк для тестов ----------
+log "core/src/$PASCAL/{Application/Port,Infrastructure/Grpc}, tests/Fake"
+CORE="$BACKEND/core"
+mkdir -p "$CORE/src/$PASCAL/Application/Port" "$CORE/src/$PASCAL/Infrastructure/Grpc" "$CORE/tests/Fake"
+cat > "$CORE/src/$PASCAL/Application/Port/${PASCAL}Gateway.php" <<PHP
+<?php
+
+declare(strict_types=1);
+
+namespace App\\$PASCAL\\Application\\Port;
+
+/** Порт к Go-микросервису $NAME. Реализация — в Infrastructure. */
+interface ${PASCAL}Gateway
+{
+    public function ping(string \$message): string;
+}
+PHP
+cat > "$CORE/src/$PASCAL/Infrastructure/Grpc/Grpc${PASCAL}Gateway.php" <<PHP
+<?php
+
+declare(strict_types=1);
+
+namespace App\\$PASCAL\\Infrastructure\\Grpc;
+
+use App\\$PASCAL\\Application\\Port\\${PASCAL}Gateway;
+use App\\Shared\\Infrastructure\\Grpc\\GrpcGateway;
+use Desigram\\$PASCAL\\V1\\PingRequest;
+use Desigram\\$PASCAL\\V1\\PingResponse;
+use Desigram\\$PASCAL\\V1\\${PASCAL}ServiceClient;
+use Symfony\\Component\\DependencyInjection\\Attribute\\Autowire;
+
+final class Grpc${PASCAL}Gateway extends GrpcGateway implements ${PASCAL}Gateway
+{
+    private ${PASCAL}ServiceClient \$client;
+
+    public function __construct(#[Autowire(env: '${UPPER}_GRPC_ADDR')] string \$address)
+    {
+        \$this->client = new ${PASCAL}ServiceClient(\$address, self::channelOptions());
+    }
+
+    public function ping(string \$message): string
+    {
+        /** @var PingResponse \$reply */
+        \$reply = \$this->call(fn (): array => \$this->client->Ping((new PingRequest())->setMessage(\$message), [], self::callOptions())->wait());
+
+        return \$reply->getMessage();
+    }
+
+    protected static function serviceName(): string
+    {
+        return '$NAME';
+    }
+}
+PHP
+cat > "$CORE/tests/Fake/InMemory${PASCAL}Gateway.php" <<PHP
+<?php
+
+declare(strict_types=1);
+
+namespace App\\Tests\\Fake;
+
+use App\\$PASCAL\\Application\\Port\\${PASCAL}Gateway;
+
+final class InMemory${PASCAL}Gateway implements ${PASCAL}Gateway
+{
+    public function ping(string \$message): string
+    {
+        return 'pong: '.\$message;
+    }
+}
+PHP
+perl -0pi -e "s|(when\@test:\n    services:\n)|\$1        App\\\\Tests\\\\Fake\\\\InMemory${PASCAL}Gateway: ~\n        App\\\\$PASCAL\\\\Application\\\\Port\\\\${PASCAL}Gateway: '\@App\\\\Tests\\\\Fake\\\\InMemory${PASCAL}Gateway'\n|" "$CORE/config/services.yaml"
+
 # ---------- единая точка настройки ----------
 log "ansible group_vars + .env.example"
 perl -0pi -e "s|(service_replicas:\n(?:  \w+: \d+\n)*)|\$1  $NAME: 1\n|" "$ENV/ansible/inventory/group_vars/all.yml"
@@ -184,6 +257,6 @@ cat <<MSG
 
 Дальше:
   1. Опиши RPC в proto, перегенерируй: make proto
-  2. В core добавь порт + gRPC-адаптер (пример: src/Ping/Application/Port, src/Ping/Infrastructure/Grpc)
+  2. В core порт + gRPC-адаптер уже созданы (src/$PASCAL/{Application/Port,Infrastructure/Grpc}, tests/Fake) — опиши реальные RPC
   3. make configure && make dev
 MSG
