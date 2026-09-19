@@ -1,3 +1,6 @@
 .DS_Store
 .pnpm-store/
 plans/
+# локальные скиллы Claude, в репо не идут
+.agents/
+skills-lock.json
