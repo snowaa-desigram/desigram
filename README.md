@@ -79,6 +79,7 @@ enviropment/             # git submodule
   ansible/               # ЕДИНАЯ ТОЧКА НАСТРОЙКИ + деплой
   php/ go/ python/ nextjs/ buf/  # Dockerfile'ы (buf — тулчейн генерации)
 frontend/                # git submodule (Next.js, FSD: src/_app (providers, metrika), src/_pages, src/shared/config)
+desktop/                 # git submodule (Electron-оболочка над сайтом: src/main, src/preload, src/shared/bridge.ts)
 scripts/new-service.sh   # генератор микросервиса
 scripts/e2e.sh           # сквозная проверка поднятого стека
 tests/load/api.js        # k6-сценарий «200 онлайн»
@@ -335,6 +336,7 @@ Python-сервис: скопировать `services/python/telegram/` (`<name>
 | Symfony core | `architecture-core` | `Presentation/Http → Application/{Command,Query,Port,EventSubscriber} → Domain/{Model,ValueObject,Event,Repository,Exception}`; `Infrastructure/<Tech>/<Tech>*` реализует порты и репозитории | deptrac (слои), `tests/Architecture/ContextIsolationTest` (контексты), `tests/Architecture/NamingConventionTest` (папки, имена, наличие тестов) |
 | Go | `architecture-go-service` | `internal/<name>/transport → service → store`, `adapter/` — внешние системы, `config.go` + `cmd/<name>/main.go` — композиция; тесты только в `tests/<name>/` | `tests/architecture/layers_test.go` (парсит импорты всех сервисов), depguard в `.golangci.yml` |
 | Python | `architecture-python-service` | `<name>_service/servicer → service → clients/`; `service` — без grpc и pb, порты — `Protocol` | `import-linter` (`uv run lint-imports`, контракты в `pyproject.toml`) |
+| Desktop (Electron) | `architecture-desktop` | `src/main` (окно, навигация, deep-links, updater) и `src/preload` (мост) → `src/shared/bridge.ts`; фронт видит только `window.desktop` через `@shared/platform` | eslint `no-restricted-imports` по слоям, vitest (`webPreferences`, политика ссылок), сверка контракта моста с фронтом |
 | Frontend | — (FSD) | `src/_app → _pages → widgets → features → entities → shared`, импорты только вниз, публичный API слайса — `index.ts` | `steiger` (`pnpm lint`, `steiger.config.ts`) |
 
 Все проверки входят в `make test` и CI сабмодуля `backend`.
@@ -354,6 +356,18 @@ pnpm dlx skills add markpitt/claude-skills --skill gof-design-patterns   # → .
 - **Python** — граф модулей по каждому сервису (pydeps).
 
 Только dev: сервисы `archviz-render` (образ `enviropment/archviz/`) и `archviz` (nginx) живут под профилем `archviz` в `docker-compose.dev.yml` и не поднимаются в `make dev`. Результат — статические svg/html в `var/archviz/` (в git не идёт); упавший генератор помечается на индексе с логом, остальные графы собираются. Новые сервисы подхватываются автоматически (`cmd/*`, `members`).
+
+## Десктоп
+
+Приложение для macOS / Windows / Linux — сабмодуль `desktop/`: Electron-окно загружает сайт по URL (как Figma), никакого бандла фронта внутри — один деплой фронта обновляет и сайт, и приложение. Нативное: окно с памятью размера, меню, внешние ссылки в системный браузер, навигация только в своём origin, deep-links `gram-designer://…`, автообновление из GitHub Releases, экран «нет соединения». Мост — `window.desktop` (`platform`, `version`, `openExternal`, `onDeepLink`) через `contextBridge`; фронт обращается к нему только через `src/shared/platform` (`isDesktop()`, `openExternal()`), тип-копия `desktop.d.ts` сверяется тестом в `desktop`. Спеки — `openspec/specs/{desktop-shell,desktop-bridge,desktop-release,architecture-desktop}`.
+
+```bash
+cd desktop && pnpm install && pnpm dev     # против https://gram-designer.localhost:8443 (make dev + make cert)
+pnpm build                                 # установщик для своей ОС → desktop/dist/
+git tag v0.2.0 && git push --tags          # release.yml → dmg / exe / AppImage в GitHub Releases; сайт /download ведёт на них
+```
+
+Ограничения: сборки **не подписаны** (нет Apple Developer / сертификата Windows) — ОС предупреждает при установке, на macOS автообновление невозможно (приложение предлагает скачать новую версию); офлайн-старт без сети — после local-first.
 
 ## Тесты и CI
 

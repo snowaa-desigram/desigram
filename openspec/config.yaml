@@ -24,6 +24,9 @@ context: |
   - Микросервисы внутренние, только gRPC; наружу торчит только auth (api.<domain>/api/auth/*).
   - enviropment/ — compose (include services/*.yml) + Ansible как единая точка настройки и деплоя.
   - frontend/ — Next.js, FSD (steiger); ходит на api.<domain> из браузера, в http://core:8080 из SSR.
+  - desktop/ — Electron-оболочка над сайтом (окно грузит URL, бандла фронта нет): src/main (окно, навигация, deep-links, updater),
+    src/preload (contextBridge → window.desktop), src/shared/bridge.ts — контракт моста, копия во frontend/src/shared/platform/desktop.d.ts.
+    Нативные возможности фронту — только через мост; фронт читает его только через @shared/platform.
   - Новый микросервис создаётся через `make new-service NAME=<name>` (не руками).
 
   Проверки (гоняются в CI и локально теми же командами): make proto-lint / proto-breaking / openapi,
@@ -42,6 +45,7 @@ rules:
     - Для core — назови bounded context и слои (Domain/Application/Infrastructure/Presentation), которые затрагиваются
     - Если нужна связь между контекстами — только через события; покажи, какое событие и кто подписчик
     - Если нужен новый внешний вызов из core — порт в Application/Port + адаптер на GrpcGateway + фейк в tests/Fake
+    - Если фронту нужна нативная возможность — новый метод в DesktopBridge (desktop/src/shared/bridge.ts + копия во frontend), модуль в desktop/src/main, канал desktop:<domain>:<action>; в фронте — обёртка в @shared/platform
     - Новые классы с суффиксом Factory/Visitor/Strategy/Decorator в Shared — отдельный пункт в «Паттернах» с ≥2 контекстами, где это нужно, или не добавляй
   specs:
     - Требования формулируй так, чтобы их можно было проверить существующими слоями тестов (контракты / архитектура / unit / e2e)

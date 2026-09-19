@@ -7,3 +7,6 @@
 [submodule "backend"]
 	path = backend
 	url = git@github.com:snowaa-desigram/backend.git
+[submodule "desktop"]
+	path = desktop
+	url = git@github.com:snowaa-desigram/desktop.git
