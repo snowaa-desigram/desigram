@@ -4,8 +4,9 @@ PROD    = $(COMPOSE) -f enviropment/docker-compose.prod.yml
 BUF_IMG = desigram/buf
 BUF     = docker run --rm -v "$(CURDIR)/backend":/workspace $(BUF_IMG)
 ANSIBLE = cd enviropment/ansible && ansible-playbook
+OAPI_CODEGEN = go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.8.0
 
-.PHONY: cert configure dev prod deploy stop down logs ps proto proto-lint proto-breaking new-service core-sh core-console core-lint core-test test e2e load
+.PHONY: cert configure dev prod deploy stop down logs ps proto proto-lint proto-breaking openapi new-service core-sh core-console core-lint core-test test e2e load
 
 buf-image:            ## собрать образ генерации (buf + плагины)
 	docker build -q -t $(BUF_IMG) enviropment/buf
@@ -51,6 +52,10 @@ proto-breaking:       ## что сломалось в контрактах от�
 	@rm -rf backend/.proto-against && mkdir -p backend/.proto-against
 	@git -C backend archive $(or $(AGAINST),main) proto | tar -x -C backend/.proto-against
 	@$(BUF) breaking proto --against .proto-against/proto; r=$$?; rm -rf backend/.proto-against; exit $$r
+
+# --- HTTP-контракты: backend/openapi -> Go-типы (фронт: openapi-typescript) ---
+openapi:
+	cd backend/services/go && $(OAPI_CODEGEN) -config oapi-codegen.yaml ../../openapi/auth.yaml
 
 new-service:          ## make new-service NAME=media
 	./scripts/new-service.sh $(NAME)

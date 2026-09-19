@@ -36,14 +36,14 @@ jobs:
           files: |
             docker-compose.yml
             docker-compose.dev.yml
-          targets: core,ping,telegram
+          targets: core,ping,telegram,auth
           load: true
           set: |
             *.cache-from=type=gha
             *.cache-to=type=gha,mode=max
 
       - name: Start stack (без frontend/traefik/metrika)
-        run: $COMPOSE up -d --no-build --wait --wait-timeout 180 core core-worker ping telegram
+        run: $COMPOSE up -d --no-build --wait --wait-timeout 180 core core-worker ping telegram auth mailpit
 
       - run: ./scripts/e2e.sh
 
@@ -51,7 +51,7 @@ jobs:
         if: failure()
         run: |
           echo "::group::docker compose ps -a"; $COMPOSE ps -a; echo "::endgroup::"
-          for s in core-worker core ping telegram rabbitmq; do
+          for s in core-worker core ping telegram auth auth-migrate mailpit rabbitmq; do
             echo "::group::logs $s"; $COMPOSE logs --tail 100 $s; echo "::endgroup::"
           done
 
