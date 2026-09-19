@@ -87,9 +87,15 @@ tests/load/api.js        # k6-сценарий «200 онлайн»
 
 ## Единая точка настройки
 
-Все параметры (домен, порты, креды MySQL/RabbitMQ, токены, число реплик, rate-limit, режим Go-сервисов) — в
-`enviropment/ansible/inventory/group_vars/{all,local,prod}.yml`. Секреты — `ansible-vault`
-(`vault.yml.example`). Из них Ansible генерирует `enviropment/.env`, который читает compose.
+Все параметры (домен, порты, креды MySQL/RabbitMQ, токены, число реплик, rate-limit, режим Go-сервисов, **адрес и ключи прод-сервера**) — в
+`enviropment/ansible/inventory/group_vars/{all,local,prod}.yml`. Секреты — `ansible-vault` (`inventory/group_vars/prod/vault.yml`, зашифрованный
+файл коммитится; пароль — `enviropment/ansible/.vault-pass`, gitignored). Из них Ansible генерирует `enviropment/.env`, который читает compose.
+
+```bash
+make configure          # group_vars -> enviropment/.env (локально)
+make bootstrap          # свежий сервер: hardening + docker (один раз, от root провайдера)
+make deploy             # прод: код + .env + compose up (то же делает CI при push в main)
+```
 
 ### Имя проекта и домен
 
@@ -205,9 +211,60 @@ XDEBUG_MODE=debug make dev   # xdebug -> IDE на 9003
 | Grafana `Exited (1)`, `Datasource provisioning error` | старый volume `grafana_data` | уже обработано (`deleteDatasources`); если повторится — `docker volume rm enviropment_grafana_data` |
 | Frontend `Restarting` с `ERR_PNPM_…` | `node_modules` в контейнере разошёлся с lock'ом | `docker compose … up -d --force-recreate -V frontend` (пересоздать anonymous volume) |
 | 503/504 через Traefik сразу после `make dev` | бэкенд ещё не прошёл healthcheck | подождать 10–20 с; https://traefik.gram-designer.localhost:8443/dashboard/ → Services покажет `UP` |
+| `could not find a network matching network mode <старое имя>` после смены `project_name` | половина контейнеров ещё на старой сети | `docker compose … down --remove-orphans && make dev` (volume'ы остаются) |
 | Полный сброс | — | `make down && docker volume rm $(docker volume ls -q \| grep ^enviropment_) && make dev` |
 
 `docker compose …` здесь = `docker compose -f enviropment/docker-compose.yml -f enviropment/docker-compose.dev.yml`.
+
+## Прод: от покупки сервера до деплоя
+
+Всё, что нужно вписать, — в одном файле `enviropment/ansible/inventory/group_vars/prod.yml` плюс зашифрованный `prod/vault.yml`.
+
+```bash
+# 0. один раз на машине
+make ansible-deps                                   # коллекции community.general, ansible.posix
+# 1. купил VPS (Ubuntu 24.04, 4 vCPU / 8 ГБ), получил root-доступ по ключу или паролю
+#    prod.yml:  prod_server_ip: <ip>   deploy_ssh_public_keys: [<твой ключ>, <ключ CI>]   domain: gram-designer.com
+# 2. секреты
+cd enviropment/ansible && openssl rand -base64 24 > .vault-pass
+ansible-vault create inventory/group_vars/prod/vault.yml   # по образцу vault.yml.example; JWT/APP_SECRET — 32+ символа
+cd ../..
+# 3. DNS: A-записи @ и api → <ip> (Let's Encrypt проверит их при первом старте)
+# 4. сервер с нуля
+make bootstrap                                      # от root: пользователь deploy, ssh только по ключу, ufw 22/80/443,
+                                                    # fail2ban, security-обновления, swap, docker + log-rotation
+make deploy                                         # от deploy: git clone --recurse-submodules, .env из group_vars, compose up --build
+```
+
+`make bootstrap` при доступе по паролю: `make bootstrap ROOT_PASS=1` (спросит пароль). После bootstrap root-логин и пароли закрыты — только ключи из `deploy_ssh_public_keys`.
+
+**CI/CD**: `.github/workflows/deploy.yml` — на каждый push в `main` (и вручную) раннер ставит ansible и выполняет тот же `site.yml`, что и `make deploy`. Секреты репозитория: `DEPLOY_SSH_KEY` (приватный ключ, чей публичный лежит в `deploy_ssh_public_keys`), `ANSIBLE_VAULT_PASSWORD`, `SUBMODULES_TOKEN`. Приватные репозитории сервер клонирует по fine-grained PAT из `vault_github_token`. Environment `production` в GitHub можно включить с обязательным approve.
+
+Что делает `site.yml` линейно: `server` (hardening, идемпотентно — можно гонять каждый деплой) → `docker` → `app` (код → `.env` → `docker compose up -d --build`). Образы пока собираются на сервере (поэтому 8 ГБ + swap); следующий шаг — сборка в GitHub Actions и `pull` из GHCR, тогда серверу хватит 2 vCPU / 4 ГБ.
+
+## Безопасность
+
+По [MDN Practical security implementation guides](https://developer.mozilla.org/en-US/docs/Web/Security/Practical_implementation_guides). Заголовки — **одно место**: `enviropment/traefik/dynamic/headers.yml` (middlewares Traefik), роутеры подключают их в compose.
+
+| MDN | Как сделано |
+| --- | --- |
+| TLS, редирект на HTTPS | Traefik: dev — mkcert, prod — Let's Encrypt (`certresolver=le` на core/auth/frontend); `web` → `websecure` редирект |
+| HSTS | middleware `hsts` (2 года, includeSubDomains, preload) — только prod; на `*.localhost` намеренно нет |
+| Clickjacking | `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'` (для Telegram Mini App добавить `https://web.telegram.org`) |
+| CSP | frontend: `app-csp` (`default-src 'self'`, `object-src 'none'`, `base-uri 'none'`, `form-action 'self'`, `'wasm-unsafe-eval'` + `worker-src blob:` под SQLite WASM; dev — `app-csp-dev` с `'unsafe-eval'`/`ws:` для HMR). API: `default-src 'none'`. **Долг**: `script-src 'unsafe-inline'` — заменить на nonce в Next.js `proxy.ts` |
+| MIME sniffing | `X-Content-Type-Options: nosniff` |
+| Referrer | `strict-origin-when-cross-origin` |
+| CORS | auth — middleware `api-cors` (origin = `https://<domain>`); core — `nelmio/cors-bundle`, тот же origin из `CORS_ALLOW_ORIGIN` |
+| CORP / COOP | `Cross-Origin-Resource-Policy: same-site`, `Cross-Origin-Opener-Policy: same-origin` |
+| Permissions-Policy | камера, микрофон, геолокация, платежи, USB — выключены |
+| Cookies | не используются: auth — Bearer JWT (15 мин) + refresh в теле; при переносе refresh в cookie — `Secure; HttpOnly; SameSite=Strict` |
+| Rate limit | Traefik per-IP: core 50 r/s, auth 10 r/s; в auth — лимиты на коды и неудачные логины (Redis) |
+| Секреты | ansible-vault; `JWT_SECRET` ≥ 32 байт проверяется auth на старте; в логи не пишутся |
+| Контейнеры | `no-new-privileges` на всех сервисах; docker.sock у Traefik read-only; наружу проброшены только 80/443 (prod), остальное — внутренняя сеть |
+| Сервер | `make bootstrap`: ssh только по ключу и только `deploy`, root закрыт, ufw (22 limit/80/443), fail2ban, unattended security upgrades, sysctl |
+| Dashboards | Traefik/RabbitMQ/Grafana/Prometheus/Jaeger/Mailpit — только в `docker-compose.dev.yml`, в prod не публикуются |
+
+Проверить: `curl -sI https://api.<domain>/health | grep -iE "strict|content-security|x-frame|nosniff|referrer|permissions|cross-origin"`; для фронта — [securityheaders.com](https://securityheaders.com) после деплоя.
 
 ## Контракты
 

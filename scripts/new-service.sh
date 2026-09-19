@@ -157,6 +157,7 @@ services:
       replicas: \${${UPPER}_REPLICAS:-1}
     networks:
       - app
+    security_opt: [no-new-privileges:true]
     restart: unless-stopped
 YML
 perl -0pi -e "s|(include:\n(?:  - path: services/.*\n)*)|\$1  - path: services/$NAME.yml\n|" "$ENV/docker-compose.yml"

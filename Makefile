@@ -11,10 +11,11 @@ API_URL  = $(call env,PUBLIC_API_URL,https://api.$(DOMAIN):8443)
 DOMAINS ?= $(DOMAIN) $(addsuffix .$(DOMAIN),api traefik grafana prometheus jaeger rabbitmq mail)
 BUF_IMG = $(PROJECT)/buf
 BUF     = docker run --rm -v "$(CURDIR)/backend":/workspace $(BUF_IMG)
-ANSIBLE = cd enviropment/ansible && ansible-playbook
+# пароль vault: enviropment/ansible/.vault-pass (gitignored), если есть; в CI — из секрета ANSIBLE_VAULT_PASSWORD
+ANSIBLE = cd enviropment/ansible && $(if $(wildcard enviropment/ansible/.vault-pass),ANSIBLE_VAULT_PASSWORD_FILE=.vault-pass,) ansible-playbook
 OAPI_CODEGEN = go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.8.0
 
-.PHONY: cert configure dev prod deploy stop down logs ps proto proto-lint proto-breaking openapi new-service core-sh core-console core-lint core-test test e2e load
+.PHONY: cert configure dev prod bootstrap deploy ansible-deps stop down logs ps proto proto-lint proto-breaking openapi new-service core-sh core-console core-lint core-test test e2e load
 
 buf-image:            ## собрать образ генерации (buf + плагины)
 	docker build -q -t $(BUF_IMG) enviropment/buf
@@ -33,8 +34,14 @@ dev: configure        ## локальный стек
 prod:                 ## прод-стек на этой машине (обычно — через deploy)
 	$(PROD) up -d --build --remove-orphans
 
-deploy:               ## разворот на prod-серверы из inventory (docker + git + compose)
+bootstrap:            ## свежий сервер (root от провайдера): hardening + docker; дальше только deploy-пользователем
+	$(ANSIBLE) playbooks/bootstrap.yml -l prod $(if $(ROOT_PASS),-k,)
+
+deploy:               ## разворот/обновление прод-серверов из inventory (hardening + docker + git + compose)
 	$(ANSIBLE) playbooks/site.yml -l prod
+
+ansible-deps:         ## коллекции ansible (community.general, ansible.posix)
+	cd enviropment/ansible && ansible-galaxy collection install -r requirements.yml
 
 stop:
 	$(DEV) stop

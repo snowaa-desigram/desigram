@@ -1,0 +1,47 @@
+# CD: push в main (после зелёного CI сабмодулей) → ansible с раннера → прод-сервер из enviropment/ansible/inventory.
+# Нужные секреты репозитория: DEPLOY_SSH_KEY (приватный ключ deploy-пользователя), ANSIBLE_VAULT_PASSWORD,
+# SUBMODULES_TOKEN (PAT repo:read — для checkout приватных сабмодулей на раннере).
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.SUBMODULES_TOKEN || github.token }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ansible
+        run: |
+          pip install -q ansible
+          cd enviropment/ansible && ansible-galaxy collection install -q -r requirements.yml
+
+      - name: SSH key and vault password
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+          printf '%s' "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" > enviropment/ansible/.vault-pass && chmod 600 enviropment/ansible/.vault-pass
+
+      - name: Deploy
+        env:
+          ANSIBLE_VAULT_PASSWORD_FILE: .vault-pass
+        run: cd enviropment/ansible && ansible-playbook playbooks/site.yml -l prod
+
+      - if: always()
+        run: rm -f ~/.ssh/id_ed25519 enviropment/ansible/.vault-pass
