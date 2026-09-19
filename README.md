@@ -137,7 +137,7 @@ make dev                # = make configure + compose up --build
 | Почта (dev)| https://mail.desigram.localhost:8443 (Mailpit: сюда падают коды подтверждения) |
 | Профайлер  | https://api.desigram.localhost:8443/_profiler |
 | Traefik    | https://traefik.desigram.localhost:8443/dashboard/ |
-| Grafana    | https://grafana.desigram.localhost:8443 (admin/admin) |
+| Grafana    | https://grafana.desigram.localhost:8443 (admin/admin), дашборд Auth — из provisioning |
 | Prometheus | https://prometheus.desigram.localhost:8443   |
 | Jaeger     | https://jaeger.desigram.localhost:8443       |
 | RabbitMQ   | https://rabbitmq.desigram.localhost:8443 (desigram/desigram), AMQP 127.0.0.1:5673 |
@@ -195,6 +195,8 @@ GET  /api/me  (core)                   Bearer → 200 {id,email}
 
 `JWT_SECRET` (group_vars `jwt_secret`, prod — vault) общий для auth и core, **не короче 32 байт**. SMTP — `smtp_*` в group_vars (локально — Mailpit).
 
+Метрики — в общий стек: Prometheus скрейпит `auth:9091` (`enviropment/prometheus/prometheus.yml`), трейсы — в Jaeger (`Telemetry` в `etc/auth.yaml`), дашборд **Auth** в Grafana ставится provisioning'ом (`enviropment/grafana/provisioning/dashboards/auth.json`): RPS, p95, 5xx, регистрации/логины/блокировки в час, отказы по причине, SMTP. Свои метрики (`internal/auth/metrics.go`): `auth_operations_total{op,result}` (result = `ok` | код ошибки из `common.yaml` | `internal`), `auth_operation_duration_ms{op}`, `auth_mail_total{purpose,result}`, `auth_mail_duration_ms{purpose}`; HTTP-метрики `http_server_requests_*` снимает сам go-zero.
+
 Код сервиса — линейный, без слоёв: `internal/auth/{routes,handler,service,store*,token,mailer}.go`; интерфейсы только у хранилищ и почты (ради in-memory в тестах). Новый HTTP-сервис — по образцу auth (генератор `make new-service` — для gRPC).
 
 ## Новый микросервис
@@ -240,7 +242,7 @@ E2E в CI собирает образы через `docker buildx bake` с GHA-�
 | БД             | SQL только через Redis: Doctrine L2/result cache + `CachedRepository`; MySQL видит промахи и записи | TTL в `doctrine.yaml` / `CachedRepository::TTL` |
 | Тяжёлые задачи | Messenger async → RabbitMQ → `core-worker`, retry, failed-транспорт | `core_worker_replicas`                 |
 | Микросервисы   | независимые реплики, gRPC-балансировка через DNS docker         | `service_replicas.<name>`              |
-| Наблюдаемость  | Prometheus + Grafana + Jaeger (dev)                             | —                                      |
+| Наблюдаемость  | Prometheus + Grafana + Jaeger (dev); дашборды — `grafana/provisioning/dashboards/*.json` (Auth) | —                                      |
 
 Следующие ступени, когда один сервер перестанет хватать: вынести MySQL/Redis/RabbitMQ на отдельные машины
 (в `.env` это просто другие хосты), и перейти с compose на Swarm/K8s — контракты, образы и
