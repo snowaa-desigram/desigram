@@ -38,7 +38,7 @@ flowchart LR
   - Go: один модуль, бинарник на сервис (`cmd/<name>/main.go` + `etc/<name>.yaml`), слои `internal/<name>/{transport,service,store,adapter}` (см. «Архитектура кода»), тесты — отдельно в `tests/<name>/`. Каркас — [go-zero](https://go-zero.dev): `zrpc` для gRPC-сервисов, `rest` для auth (HTTP + JWT-middleware). zrpc: конфиг из YAML с `${ENV}`, логирование, health, Prometheus (`:9091/metrics`), OpenTelemetry-трейсы (в dev — в Jaeger), graceful shutdown; в `Mode: dev|test` включён gRPC reflection.
   - Python: uv-workspace `services/python/` — общий пакет `desigram-common` (`serve()`: health, reflection, логи, graceful shutdown, `Settings` из env) + сервисы (`telegram`).
 - **Контракты**: gRPC — `backend/proto` (генерация `buf` локальными плагинами, образ `enviropment/buf`); HTTP — `backend/openapi/*.yaml` (`common.yaml` — общая схема `Error`, `auth.yaml` — auth; Go-типы через `oapi-codegen`, фронт — `openapi-typescript`). Контракт — единственный источник правды для всех языков; код из него генерируется и коммитится, CI проверяет, что он не отстал.
-- **Frontend** (Next.js) — отдельный контейнер за Traefik. Из браузера ходит на `api.<domain>` (CORS в core через `nelmio/cors-bundle`, origin = `https://<domain>`), из SSR — напрямую в `http://core:8080` (`API_URL_INTERNAL`).
+- **Frontend** (Next.js) — отдельный контейнер за Traefik. Из браузера ходит на `api.<domain>` (CORS в core через `nelmio/cors-bundle`, origin = `https://<domain>`), из SSR — напрямую в `http://core:8080` (`API_URL_INTERNAL`). Код — по FSD в `src/{_app,_pages,widgets,features,entities,shared}` (алиасы `@app/*`, `@shared/*`…; `app/` и `pages/` заняты Next, поэтому слои с подчёркиванием), слои проверяет `steiger` в `pnpm lint`. Состояние — TanStack Query (сервер) + zustand (клиент). Яндекс.Метрика (`react-metrika`, SPA-хиты на смену URL, webvisor) подключается, только если `NEXT_PUBLIC_METRIKA_ID` задан при сборке образа.
 
 ### Поток запроса (пример `GET /api/ping`)
 
@@ -78,7 +78,7 @@ enviropment/             # git submodule
   services/<name>.yml    # по файлу на микросервис (auth.yml — плюс auth-migrate и Traefik-роутер)
   ansible/               # ЕДИНАЯ ТОЧКА НАСТРОЙКИ + деплой
   php/ go/ python/ nextjs/ buf/  # Dockerfile'ы (buf — тулчейн генерации)
-frontend/                # git submodule (Next.js)
+frontend/                # git submodule (Next.js, FSD: src/_app (providers, metrika), src/_pages, src/shared/config)
 scripts/new-service.sh   # генератор микросервиса
 scripts/e2e.sh           # сквозная проверка поднятого стека
 tests/load/api.js        # k6-сценарий «200 онлайн»
@@ -87,7 +87,7 @@ tests/load/api.js        # k6-сценарий «200 онлайн»
 
 ## Единая точка настройки
 
-Все параметры (домен, порты, креды MySQL/RabbitMQ, токены, число реплик, rate-limit, режим Go-сервисов, **адрес и ключи прод-сервера**) — в
+Все параметры (домен, порты, креды MySQL/RabbitMQ, токены, число реплик, rate-limit, режим Go-сервисов, номер счётчика Яндекс.Метрики `metrika_id` (пусто — не подключается), **адрес и ключи прод-сервера**) — в
 `enviropment/ansible/inventory/group_vars/{all,local,prod}.yml`. Секреты — `ansible-vault` (`inventory/group_vars/prod/vault.yml`, зашифрованный
 файл коммитится; пароль — `enviropment/ansible/.vault-pass`, gitignored). Из них Ansible генерирует `enviropment/.env`, который читает compose.
 
@@ -335,6 +335,7 @@ Python-сервис: скопировать `services/python/telegram/` (`<name>
 | Symfony core | `architecture-core` | `Presentation/Http → Application/{Command,Query,Port,EventSubscriber} → Domain/{Model,ValueObject,Event,Repository,Exception}`; `Infrastructure/<Tech>/<Tech>*` реализует порты и репозитории | deptrac (слои), `tests/Architecture/ContextIsolationTest` (контексты), `tests/Architecture/NamingConventionTest` (папки, имена, наличие тестов) |
 | Go | `architecture-go-service` | `internal/<name>/transport → service → store`, `adapter/` — внешние системы, `config.go` + `cmd/<name>/main.go` — композиция; тесты только в `tests/<name>/` | `tests/architecture/layers_test.go` (парсит импорты всех сервисов), depguard в `.golangci.yml` |
 | Python | `architecture-python-service` | `<name>_service/servicer → service → clients/`; `service` — без grpc и pb, порты — `Protocol` | `import-linter` (`uv run lint-imports`, контракты в `pyproject.toml`) |
+| Frontend | — (FSD) | `src/_app → _pages → widgets → features → entities → shared`, импорты только вниз, публичный API слайса — `index.ts` | `steiger` (`pnpm lint`, `steiger.config.ts`) |
 
 Все проверки входят в `make test` и CI сабмодуля `backend`.
 
