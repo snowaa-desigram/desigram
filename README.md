@@ -1,68 +1,24 @@
 # Gram Designer
 
-Редактор макетов с автоотправкой в Telegram. Кодовое имя репозиториев и внутренних идентификаторов — `desigram` (см. «Имя проекта и домен»).
+Редактор макетов с автоотправкой в Telegram. Работает как сайт (**gram-designer.com**) и как приложение для macOS / Windows / Linux — это одно и то же веб-приложение, десктоп лишь открывает его в своём окне. Кодовое имя репозиториев и внутренних идентификаторов — `desigram` (см. «Имя проекта и домен»).
 
 ```bash
 git clone --recurse-submodules git@github.com:snowaa-desigram/desigram.git
 ```
 
-## Архитектура
+README читается сверху вниз: что это → из чего состоит → как работает → десктоп → запустить локально → настроить → прод → код → проверки → безопасность.
 
-```mermaid
-flowchart LR
-    U((Клиент)) -->|HTTPS| T[Traefik<br/>TLS · LB · rate-limit]
-    T -->|gram-designer.*| F[Next.js]
-    T -->|api.gram-designer.*| C[Symfony core · DDD<br/>реплики ×N]
-    T -->|api.gram-designer.*/api/auth| A[Go: auth · go-zero rest<br/>JWT HS256 ×N]
-    A -->|SMTP| M[Mailpit / SMTP]
-    A --> R
-    A -.->|miss| DB
-    C -.->|проверяет JWT<br/>тем же секретом| A
-    C -->|gRPC| P[Go: ping<br/>×N]
-    C -->|gRPC| TG[Python: telegram<br/>×N]
-    C -->|cache-aside| R[(Redis)]
-    R -.->|miss| DB[(MySQL)]
-    C -->|Messenger async| Q[(RabbitMQ)]
-    Q --> W[core-worker<br/>×N]
-    W -->|gRPC| TG
-    W -->|gRPC| P
-    W --> R
-```
+## 1. Из чего состоит
 
-- **Traefik** — единственная точка входа. TLS (локально mkcert, в проде Let's Encrypt), балансировка между репликами, rate-limit на API, healthcheck.
-- **Auth** (`backend/services/go/cmd/auth`) — единственный микросервис, который торчит наружу: `api.<domain>/api/auth/*` (Traefik, правило длиннее core-вского → приоритет). Регистрация/вход по email+password, коды подтверждения на почту (регистрация, сброс пароля), access-JWT (HS256, 15 мин) + refresh (opaque, 30 дней, ротация). Контракт — **OpenAPI** `backend/openapi/auth.yaml`, из него генерятся Go-типы (`make openapi`) и типы для фронта. Хранилище — GORM в общей MySQL (таблицы `auth_*`, миграции — одноразовый `auth-migrate`), пользователи читаются через Redis-кеш, коды/счётчики — Redis с TTL. Core проверяет тот же JWT (`JWT_SECRET`) и отдаёт `GET /api/me`.
-- **Symfony core** (`backend/core`) — публичный API (всё, кроме `/api/auth/*`) и «оркестратор». DDD: `src/<Context>/{Domain,Application,Infrastructure,Presentation}` + `src/Shared`. Stateless (без сессий, кеш в Redis) → масштабируется репликами.
-- **Redis** — только кеш. **В SQL ходим только через Redis**: Doctrine query/result/second-level cache живут в Redis во всех окружениях, репозитории наследуют `Shared/Infrastructure/Persistence/Doctrine/CachedRepository` (`remember()` — чтение через кеш, `save()/forget()` — запись + инвалидация, `cachedQuery()` — выборки с result cache). MySQL видит только промахи кеша и записи.
-- **RabbitMQ** — очередь. Тяжёлые команды (например `SendPhotoCommand`) уходят в `async`-транспорт Messenger (AMQP), HTTP отвечает `202`, выполняет `core-worker`; retry ×3, упавшие — в `failed`.
-- **Микросервисы** (`backend/services/*`) — внутренние, только gRPC (исключение — auth, см. выше).
-  - Go: один модуль, бинарник на сервис (`cmd/<name>/main.go` + `etc/<name>.yaml`), слои `internal/<name>/{transport,service,store,adapter}` (см. «Архитектура кода»), тесты — отдельно в `tests/<name>/`. Каркас — [go-zero](https://go-zero.dev): `zrpc` для gRPC-сервисов, `rest` для auth (HTTP + JWT-middleware). zrpc: конфиг из YAML с `${ENV}`, логирование, health, Prometheus (`:9091/metrics`), OpenTelemetry-трейсы (в dev — в Jaeger), graceful shutdown; в `Mode: dev|test` включён gRPC reflection.
-  - Python: uv-workspace `services/python/` — общий пакет `desigram-common` (`serve()`: health, reflection, логи, graceful shutdown, `Settings` из env) + сервисы (`telegram`).
-- **Контракты**: gRPC — `backend/proto` (генерация `buf` локальными плагинами, образ `enviropment/buf`); HTTP — `backend/openapi/*.yaml` (`common.yaml` — общая схема `Error`, `auth.yaml` — auth; Go-типы через `oapi-codegen`, фронт — `openapi-typescript`). Контракт — единственный источник правды для всех языков; код из него генерируется и коммитится, CI проверяет, что он не отстал.
-- **Frontend** (Next.js) — отдельный контейнер за Traefik. Из браузера ходит на `api.<domain>` (CORS в core через `nelmio/cors-bundle`, origin = `https://<domain>`), из SSR — напрямую в `http://core:8080` (`API_URL_INTERNAL`). Код — по FSD в `src/{_app,_pages,widgets,features,entities,shared}` (алиасы `@app/*`, `@shared/*`…; `app/` и `pages/` заняты Next, поэтому слои с подчёркиванием), слои проверяет `steiger` в `pnpm lint`. Состояние — TanStack Query (сервер) + zustand (клиент). Яндекс.Метрика (`react-metrika`, SPA-хиты на смену URL, webvisor) подключается, только если `NEXT_PUBLIC_METRIKA_ID` задан при сборке образа.
+Монорепо из четырёх сабмодулей и корня. Каждый сабмодуль — отдельный репозиторий со своим CI.
 
-### Поток запроса (пример `GET /api/ping`)
-
-```
-Presentation (PingController)
-  → QueryBus (Messenger, query.bus)
-    → Application (PingHandler) → порт PingGateway (интерфейс)
-      → Infrastructure (GrpcPingGateway) → gRPC → Go ping
-```
-
-Слои проверяет `deptrac` (`Domain ← Application ← Infrastructure/Presentation`), типы — `phpstan` (level 8), стиль — `php-cs-fixer`.
-
-### Ядро core: четыре правила (ADR)
-
-| Правило | Где | Как проверяется |
-| --- | --- | --- |
-| **Команды/запросы** — только через `CommandBus`/`QueryBus`; хендлер помечен `CommandHandler`/`QueryHandler` | `Shared/Application/Bus` | `_instanceof` в `services.yaml` |
-| **События** — агрегат делает `record()`, `CachedRepository::save()` публикует их в `EventBus` после flush; подписчик = класс с `EventSubscriber` + `__invoke(Event)`. **Межконтекстная связь — только события**: контекст A не импортирует контекст B | `Shared/Application/Event`, `Shared/Infrastructure/Bus/MessengerEventBus` | `tests/Architecture/ContextIsolationTest` |
-| **Ошибки API** — бросай наследника `ApplicationException` (`NotFound`, `ValidationFailed`, `Forbidden`, `Conflict`, `ExternalServiceUnavailable`); `ApiExceptionListener` превращает любое исключение под `/api` в `{code, message, details?}` — та же схема `Error`, что у auth (`backend/openapi/common.yaml`) | `Shared/Application/Exception`, `Shared/Presentation/Http` | `ApiExceptionListenerTest` |
-| **gRPC-адаптеры** наследуют `GrpcGateway`: `$this->call(fn () => $client->Rpc($req, [], self::callOptions())->wait())` — таймаут, статус, `ExternalServiceUnavailable` в одном месте | `Shared/Infrastructure/Grpc` | `GrpcGatewayTest`; `make new-service` генерирует адаптер |
-
-Чего в `Shared` намеренно нет: фабрик репозиториев, декораторов кеша, transactional outbox (`dispatch_after_current_bus` откладывает async-события до коммита), Event Sourcing. Появление класса с суффиксом `Factory`/`Visitor`/`Strategy` — повод для вопроса «зачем» на ревью.
-
-## Структура
+| Часть | Репозиторий | Технологии | За что отвечает |
+| --- | --- | --- | --- |
+| `backend/` | `snowaa-desigram/backend` | Symfony 7.4 (core), Go / go-zero (auth, ping), Python (telegram), proto + OpenAPI | API, авторизация, внутренние сервисы, контракты |
+| `frontend/` | `snowaa-desigram/front` | Next.js 16, FSD, TanStack Query, zustand | сайт `gram-designer.com` |
+| `desktop/` | `snowaa-desigram/desktop` | Electron 44, electron-vite, electron-builder | окно с сайтом + меню, ссылки, deep-links, автообновление |
+| `enviropment/` | `snowaa-desigram/env` | Docker Compose, Traefik, Ansible | сборка, запуск, настройка, деплой |
+| корень | `snowaa-desigram/desigram` | Makefile, OpenSpec, GitHub Actions (e2e, load, deploy) | единая точка входа: `make …`, спеки, сквозные проверки |
 
 ```
 backend/                 # git submodule
@@ -86,49 +42,110 @@ tests/load/api.js        # k6-сценарий «200 онлайн»
 .github/workflows/       # e2e.yml (стек из сабмодулей), load.yml (k6)
 ```
 
-## Единая точка настройки
+## 2. Как это работает
 
-Все параметры (домен, порты, креды MySQL/RabbitMQ, токены, число реплик, rate-limit, режим Go-сервисов, номер счётчика Яндекс.Метрики `metrika_id` (пусто — не подключается), **адрес и ключи прод-сервера**) — в
-`enviropment/ansible/inventory/group_vars/{all,local,prod}.yml`. Секреты — `ansible-vault` (`inventory/group_vars/prod/vault.yml`, зашифрованный
-файл коммитится; пароль — `enviropment/ansible/.vault-pass`, gitignored). Из них Ansible генерирует `enviropment/.env`, который читает compose.
+Один вход (Traefik), три публичных приложения (сайт, auth, core), внутренние gRPC-сервисы и три хранилища. Десктоп — такой же клиент, как браузер.
 
-```bash
-make configure          # group_vars -> enviropment/.env (локально)
-make bootstrap          # свежий сервер: hardening + docker (один раз, от root провайдера)
-make deploy             # прод: код + .env + compose up (то же делает CI при push в main)
+```mermaid
+flowchart TB
+    subgraph clients [Клиенты]
+        B[Браузер]
+        D[Десктоп · Electron<br/>окно с тем же сайтом]
+    end
+    T[Traefik<br/>TLS · балансировка · rate-limit]
+    subgraph public [Публичные приложения]
+        F[Frontend · Next.js<br/>gram-designer.com]
+        A[Auth · Go<br/>api.gram-designer.com/api/auth/*]
+        C[Core · Symfony DDD<br/>api.gram-designer.com/api/*]
+    end
+    subgraph internal [Внутренние gRPC-сервисы]
+        P[ping · Go]
+        TG[telegram · Python]
+    end
+    subgraph data [Данные]
+        R[(Redis<br/>кеш, коды, лимиты)]
+        M[(MySQL)]
+        Q[(RabbitMQ)]
+    end
+    W[core-worker<br/>фоновые команды]
+
+    B --> T
+    D --> T
+    T --> F
+    T --> A
+    T --> C
+    F -. SSR: http://core:8080 .-> C
+    A --> R
+    C --> R
+    R -. промах кеша .-> M
+    C --> P
+    C --> TG
+    C -- 202 --> Q --> W
+    W --> P
+    W --> TG
 ```
 
-### Имя проекта и домен
+Путь пользователя, линейно:
 
-Три переменные в `group_vars/all.yml` (домен — в `local.yml`/`prod.yml`), больше нигде ничего менять не нужно:
+1. **Открыть сайт** — `https://gram-designer.com` → Traefik → Next.js. Десктоп делает ровно то же: его окно загружает этот URL.
+2. **Войти** — фронт шлёт `POST api.gram-designer.com/api/auth/login` → Traefik → **Auth** (Go). Auth проверяет пароль (пользователи — в MySQL через Redis-кеш), выдаёт access-JWT (15 мин) + refresh-токен.
+3. **Работать с API** — фронт зовёт `api.gram-designer.com/api/…` с `Bearer <JWT>` → Traefik → **Core** (Symfony). Core проверяет подпись JWT тем же секретом, что у Auth (`JWT_SECRET`), — Auth при этом не вызывается.
+4. **Внутри Core** — контроллер → шина команд/запросов → хендлер → порт → gRPC-адаптер → внутренний сервис (`ping`, `telegram`). В SQL Core ходит только через Redis: MySQL видит промахи кеша и записи.
+5. **Тяжёлое** (например отправка фото в Telegram) — Core отвечает `202` и кладёт команду в RabbitMQ; **core-worker** выполняет её и зовёт тот же gRPC-сервис.
+6. **Ошибки** — у Auth и Core один формат `{code, message, details?}` (`backend/openapi/common.yaml`); фронт разбирает их одинаково.
 
-| Переменная | Что задаёт | Куда доезжает |
-| --- | --- | --- |
-| `domain` | домен | Traefik-роутеры (`api.`, `traefik.`, `grafana.`, …, `mail.`), `PUBLIC_API_URL`, CORS в core, `SMTP_FROM`, ACME-email, `make cert`, `make load` |
-| `app_name` | имя продукта для людей | тема писем auth (`APP_NAME`), `NEXT_PUBLIC_APP_NAME` во фронте |
-| `project_name` | техническое имя | docker-сеть, имена образов `<project_name>/core`, папка деплоя `/opt/<project_name>`, `make new-service` |
-| `metrika_id` | номер счётчика Яндекс Метрики (только `prod.yml`; пусто — счётчик не подключается) | `METRIKA_ID` → `NEXT_PUBLIC_METRIKA_ID` во фронте (build-arg, нужен ребилд образа) |
+Подробнее по компонентам:
 
-```yaml
-# текущие значения
-# all.yml:   project_name: gram-designer   app_name: Gram Designer
-# prod.yml:  domain: gram-designer.com
-# local.yml: domain: gram-designer.localhost
+- **Traefik** — единственная точка входа. TLS (локально mkcert, в проде Let's Encrypt), балансировка между репликами, rate-limit на API, healthcheck.
+- **Auth** (`backend/services/go/cmd/auth`) — единственный микросервис, который торчит наружу: `api.<domain>/api/auth/*` (Traefik, правило длиннее core-вского → приоритет). Регистрация/вход по email+password, коды подтверждения на почту (регистрация, сброс пароля), access-JWT (HS256, 15 мин) + refresh (opaque, 30 дней, ротация). Контракт — **OpenAPI** `backend/openapi/auth.yaml`, из него генерятся Go-типы (`make openapi`) и типы для фронта. Хранилище — GORM в общей MySQL (таблицы `auth_*`, миграции — одноразовый `auth-migrate`), пользователи читаются через Redis-кеш, коды/счётчики — Redis с TTL. Core проверяет тот же JWT (`JWT_SECRET`) и отдаёт `GET /api/me`.
+- **Symfony core** (`backend/core`) — публичный API (всё, кроме `/api/auth/*`) и «оркестратор». DDD: `src/<Context>/{Domain,Application,Infrastructure,Presentation}` + `src/Shared`. Stateless (без сессий, кеш в Redis) → масштабируется репликами.
+- **Redis** — только кеш. **В SQL ходим только через Redis**: Doctrine query/result/second-level cache живут в Redis во всех окружениях, репозитории наследуют `Shared/Infrastructure/Persistence/Doctrine/CachedRepository` (`remember()` — чтение через кеш, `save()/forget()` — запись + инвалидация, `cachedQuery()` — выборки с result cache). MySQL видит только промахи кеша и записи.
+- **RabbitMQ** — очередь. Тяжёлые команды (например `SendPhotoCommand`) уходят в `async`-транспорт Messenger (AMQP), HTTP отвечает `202`, выполняет `core-worker`; retry ×3, упавшие — в `failed`.
+- **Микросервисы** (`backend/services/*`) — внутренние, только gRPC (исключение — auth, см. выше).
+  - Go: один модуль, бинарник на сервис (`cmd/<name>/main.go` + `etc/<name>.yaml`), слои `internal/<name>/{transport,service,store,adapter}` (см. «Архитектура кода»), тесты — отдельно в `tests/<name>/`. Каркас — [go-zero](https://go-zero.dev): `zrpc` для gRPC-сервисов, `rest` для auth (HTTP + JWT-middleware). zrpc: конфиг из YAML с `${ENV}`, логирование, health, Prometheus (`:9091/metrics`), OpenTelemetry-трейсы (в dev — в Jaeger), graceful shutdown; в `Mode: dev|test` включён gRPC reflection.
+  - Python: uv-workspace `services/python/` — общий пакет `desigram-common` (`serve()`: health, reflection, логи, graceful shutdown, `Settings` из env) + сервисы (`telegram`).
+- **Контракты**: gRPC — `backend/proto` (генерация `buf` локальными плагинами, образ `enviropment/buf`); HTTP — `backend/openapi/*.yaml` (`common.yaml` — общая схема `Error`, `auth.yaml` — auth; Go-типы через `oapi-codegen`, фронт — `openapi-typescript`). Контракт — единственный источник правды для всех языков; код из него генерируется и коммитится, CI проверяет, что он не отстал.
+- **Frontend** (Next.js) — отдельный контейнер за Traefik. Из браузера ходит на `api.<domain>` (CORS в core через `nelmio/cors-bundle`, origin = `https://<domain>`), из SSR — напрямую в `http://core:8080` (`API_URL_INTERNAL`). Код — по FSD в `src/{_app,_pages,widgets,features,entities,shared}` (алиасы `@app/*`, `@shared/*`…; `app/` и `pages/` заняты Next, поэтому слои с подчёркиванием), слои проверяет `steiger` в `pnpm lint`. Состояние — TanStack Query (сервер) + zustand (клиент). Яндекс.Метрика (`react-metrika`, SPA-хиты на смену URL, webvisor) подключается, только если `NEXT_PUBLIC_METRIKA_ID` задан при сборке образа.
+
+## 3. Десктоп
+
+Приложение для macOS / Windows / Linux — сабмодуль `desktop/`. Внутри нет копии фронта: окно Electron загружает сайт по URL (как у Figma). Поэтому **деплой фронта обновляет и сайт, и десктоп**, а релиз десктопа нужен только при изменении нативной части.
+
+```mermaid
+flowchart LR
+    W[Окно Electron<br/>src/main] -->|loadURL| S[https://gram-designer.com<br/>тот же фронт]
+    S -->|window.desktop| P[preload · мост<br/>src/preload]
+    P -->|IPC desktop:*| W
 ```
 
-После смены любого из них: `make configure && make cert && make dev` (образы перетегируются из кеша, сеть пересоздастся; volume'ы с данными остаются).
+Что даёт нативная часть: окно с памятью размера, системное меню, внешние ссылки — в браузер, навигация только внутри `*.gram-designer.com`, deep-links `gram-designer://…`, автообновление, экран «нет соединения». Фронт видит из этого только `window.desktop` (`platform`, `version`, `openExternal`, `onDeepLink`) — и обращается к нему исключительно через `src/shared/platform` (`isDesktop()`, `openExternal()`). Тип моста — `desktop/src/shared/bridge.ts`, копия во `frontend/src/shared/platform/desktop.d.ts`, тест в `desktop` сверяет их. Спеки — `openspec/specs/{desktop-shell,desktop-bridge,desktop-release,architecture-desktop}`.
 
-Что не переименовывается (и не должно): GitHub-репозитории `snowaa-desigram/*`, Go-модуль `github.com/snowaa-desigram/...`, proto-пакеты `desigram.*.v1`,
-PHP-namespace `Desigram\` в gen, `desigram-common` в Python, issuer JWT `desigram-auth`, креды MySQL/RabbitMQ `desigram` по умолчанию — это внутренние идентификаторы кода и инфраструктуры, пользователь их не видит.
+### Как собирается и выходит релиз
 
-```bash
-make configure          # group_vars -> enviropment/.env (локально)
-make deploy             # prod-серверы из inventory: docker + git clone + compose up
+```mermaid
+flowchart LR
+    T[git tag v0.2.0<br/>git push --tags] --> R[release.yml<br/>раннеры macOS · Windows · Ubuntu]
+    R --> V[pnpm version = тег<br/>pnpm test]
+    V --> B1[electron-vite build<br/>out/main · out/preload]
+    B1 --> B2[electron-builder<br/>dmg · exe · AppImage<br/>+ latest*.yml]
+    B2 --> G[GitHub Release v0.2.0]
+    G --> DL[сайт /download<br/>releases/latest/download/…]
+    G --> U[установленное приложение<br/>electron-updater читает latest*.yml<br/>на старте и раз в час]
 ```
 
-## Как пользоваться (локально)
+Линейно:
 
-Стек живёт в Docker за Traefik на **https://\*.gram-designer.localhost:8443** (80/443 заняты другим Docker). Всё, что ниже, — с нуля до работающего стека.
+1. **Разработка** — `cd desktop && pnpm install && pnpm dev`: окно открывает локальный сайт `https://gram-designer.localhost:8443` (нужны `make dev` и `make cert`; другой адрес — `GRAM_DESIGNER_URL=…`). `pnpm build` — установщик для своей ОС в `desktop/dist/`.
+2. **PR в `desktop`** — `ci.yml`: lint, typecheck, тесты (в т.ч. сверка контракта моста с фронтом), сборка без публикации.
+3. **Релиз** — `git tag v0.2.0 && git push --tags`. `release.yml` на трёх раннерах: версия из тега → тесты → `electron-vite build` → `electron-builder --publish always` → в GitHub Release ложатся `.dmg` (universal), `Setup.exe` (x64), `.AppImage` (x64) и `latest*.yml` для автообновления.
+4. **Установка** — страница сайта `/download` ведёт на `releases/latest/download/<файл>` и подсвечивает ОС пользователя.
+5. **Обновление** — приложение читает `latest*.yml` на старте и раз в час. Windows/Linux: скачивает в фоне и предлагает перезапуск. macOS: сборки не подписаны, поэтому предлагает скачать новую версию с сайта.
+
+Ограничения: сборки **не подписаны** (нет Apple Developer / сертификата Windows) — ОС предупреждает при установке, на macOS автообновление невозможно; офлайн-старт без сети — после local-first (сейчас экран «Нет соединения» с «Повторить»).
+
+## 4. Локальная разработка
+
+Стек живёт в Docker за Traefik на **https://\*.gram-designer.localhost:8443** (80/443 заняты другим Docker). Ниже — с нуля до работающего стека, по шагам.
 
 ### 1. Что нужно на машине
 
@@ -218,7 +235,42 @@ XDEBUG_MODE=debug make dev   # xdebug -> IDE на 9003
 
 `docker compose …` здесь = `docker compose -f enviropment/docker-compose.yml -f enviropment/docker-compose.dev.yml`.
 
-## Прод: от покупки сервера до деплоя
+## 5. Настройка
+
+Все параметры (домен, порты, креды MySQL/RabbitMQ, токены, число реплик, rate-limit, режим Go-сервисов, номер счётчика Яндекс.Метрики `metrika_id` (пусто — не подключается), **адрес и ключи прод-сервера**) — в
+`enviropment/ansible/inventory/group_vars/{all,local,prod}.yml`. Секреты — `ansible-vault` (`inventory/group_vars/prod/vault.yml`, зашифрованный
+файл коммитится; пароль — `enviropment/ansible/.vault-pass`, gitignored). Из них Ansible генерирует `enviropment/.env`, который читает compose.
+
+```bash
+make configure          # group_vars -> enviropment/.env (локально)
+make bootstrap          # свежий сервер: hardening + docker (один раз, от root провайдера)
+make deploy             # прод: код + .env + compose up (то же делает CI при push в main)
+```
+
+### Имя проекта и домен
+
+Три переменные в `group_vars/all.yml` (домен — в `local.yml`/`prod.yml`), больше нигде ничего менять не нужно:
+
+| Переменная | Что задаёт | Куда доезжает |
+| --- | --- | --- |
+| `domain` | домен | Traefik-роутеры (`api.`, `traefik.`, `grafana.`, …, `mail.`), `PUBLIC_API_URL`, CORS в core, `SMTP_FROM`, ACME-email, `make cert`, `make load` |
+| `app_name` | имя продукта для людей | тема писем auth (`APP_NAME`), `NEXT_PUBLIC_APP_NAME` во фронте |
+| `project_name` | техническое имя | docker-сеть, имена образов `<project_name>/core`, папка деплоя `/opt/<project_name>`, `make new-service` |
+| `metrika_id` | номер счётчика Яндекс Метрики (только `prod.yml`; пусто — счётчик не подключается) | `METRIKA_ID` → `NEXT_PUBLIC_METRIKA_ID` во фронте (build-arg, нужен ребилд образа) |
+
+```yaml
+# текущие значения
+# all.yml:   project_name: gram-designer   app_name: Gram Designer
+# prod.yml:  domain: gram-designer.com
+# local.yml: domain: gram-designer.localhost
+```
+
+После смены любого из них: `make configure && make cert && make dev` (образы перетегируются из кеша, сеть пересоздастся; volume'ы с данными остаются).
+
+Что не переименовывается (и не должно): GitHub-репозитории `snowaa-desigram/*`, Go-модуль `github.com/snowaa-desigram/...`, proto-пакеты `desigram.*.v1`,
+PHP-namespace `Desigram\` в gen, `desigram-common` в Python, issuer JWT `desigram-auth`, креды MySQL/RabbitMQ `desigram` по умолчанию — это внутренние идентификаторы кода и инфраструктуры, пользователь их не видит.
+
+## 6. Прод: от покупки сервера до деплоя
 
 Всё, что нужно вписать, — в одном файле `enviropment/ansible/inventory/group_vars/prod.yml` плюс зашифрованный `prod/vault.yml`.
 
@@ -244,31 +296,51 @@ make deploy                                         # от deploy: git clone --r
 
 Что делает `site.yml` линейно: `server` (hardening, идемпотентно — можно гонять каждый деплой) → `docker` → `app` (код → `.env` → `docker compose up -d --build`). Образы пока собираются на сервере (поэтому 8 ГБ + swap); следующий шаг — сборка в GitHub Actions и `pull` из GHCR, тогда серверу хватит 2 vCPU / 4 ГБ.
 
-## Безопасность
+## 7. Код
 
-По [MDN Practical security implementation guides](https://developer.mozilla.org/en-US/docs/Web/Security/Practical_implementation_guides). Заголовки — **одно место**: `enviropment/traefik/dynamic/headers.yml` (middlewares Traefik), роутеры подключают их в compose.
+### Архитектура по языкам
 
-| MDN | Как сделано |
-| --- | --- |
-| TLS, редирект на HTTPS | Traefik: dev — mkcert, prod — Let's Encrypt (`certresolver=le` на core/auth/frontend); `web` → `websecure` редирект |
-| HSTS | middleware `hsts` (2 года, includeSubDomains, preload) — только prod; на `*.localhost` намеренно нет |
-| Clickjacking | `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'` (для Telegram Mini App добавить `https://web.telegram.org`) |
-| CSP | frontend: `app-csp` (`default-src 'self'`, `object-src 'none'`, `base-uri 'none'`, `form-action 'self'`, `'wasm-unsafe-eval'` + `worker-src blob:` под SQLite WASM; dev — `app-csp-dev` с `'unsafe-eval'`/`ws:` для HMR). API: `default-src 'none'`. **Долг**: `script-src 'unsafe-inline'` — заменить на nonce в Next.js `proxy.ts` |
-| MIME sniffing | `X-Content-Type-Options: nosniff` |
-| Referrer | `strict-origin-when-cross-origin` |
-| CORS | auth — middleware `api-cors` (origin = `https://<domain>`); core — `nelmio/cors-bundle`, тот же origin из `CORS_ALLOW_ORIGIN` |
-| CORP / COOP | `Cross-Origin-Resource-Policy: same-site`, `Cross-Origin-Opener-Policy: same-origin` |
-| Permissions-Policy | камера, микрофон, геолокация, платежи, USB — выключены |
-| Cookies | не используются: auth — Bearer JWT (15 мин) + refresh в теле; при переносе refresh в cookie — `Secure; HttpOnly; SameSite=Strict` |
-| Rate limit | Traefik per-IP: core 50 r/s, auth 10 r/s; в auth — лимиты на коды и неудачные логины (Redis) |
-| Секреты | ansible-vault; `JWT_SECRET` ≥ 32 байт проверяется auth на старте; в логи не пишутся |
-| Контейнеры | `no-new-privileges` на всех сервисах; docker.sock у Traefik read-only; наружу проброшены только 80/443 (prod), остальное — внутренняя сеть |
-| Сервер | `make bootstrap`: ssh только по ключу и только `deploy`, root закрыт, ufw (22 limit/80/443), fail2ban, unattended security upgrades, sysctl |
-| Dashboards | Traefik/RabbitMQ/Grafana/Prometheus/Jaeger/Mailpit — только в `docker-compose.dev.yml`, в prod не публикуются |
+У каждого языка — одна фиксированная структура: папки, слои, нейминг. Полные правила со сценариями — спеки `openspec/specs/`, они же — контекст для проектирования в OpenSpec (`/opsx:propose`).
 
-Проверить: `curl -sI https://api.<domain>/health | grep -iE "strict|content-security|x-frame|nosniff|referrer|permissions|cross-origin"`; для фронта — [securityheaders.com](https://securityheaders.com) после деплоя.
+| Язык | Спека | Слои (зависимости только вниз) | Проверка |
+| --- | --- | --- | --- |
+| Symfony core | `architecture-core` | `Presentation/Http → Application/{Command,Query,Port,EventSubscriber} → Domain/{Model,ValueObject,Event,Repository,Exception}`; `Infrastructure/<Tech>/<Tech>*` реализует порты и репозитории | deptrac (слои), `tests/Architecture/ContextIsolationTest` (контексты), `tests/Architecture/NamingConventionTest` (папки, имена, наличие тестов) |
+| Go | `architecture-go-service` | `internal/<name>/transport → service → store`, `adapter/` — внешние системы, `config.go` + `cmd/<name>/main.go` — композиция; тесты только в `tests/<name>/` | `tests/architecture/layers_test.go` (парсит импорты всех сервисов), depguard в `.golangci.yml` |
+| Python | `architecture-python-service` | `<name>_service/servicer → service → clients/`; `service` — без grpc и pb, порты — `Protocol` | `import-linter` (`uv run lint-imports`, контракты в `pyproject.toml`) |
+| Desktop (Electron) | `architecture-desktop` | `src/main` (окно, навигация, deep-links, updater) и `src/preload` (мост) → `src/shared/bridge.ts`; фронт видит только `window.desktop` через `@shared/platform` | eslint `no-restricted-imports` по слоям, vitest (`webPreferences`, политика ссылок), сверка контракта моста с фронтом |
+| Frontend | — (FSD) | `src/_app → _pages → widgets → features → entities → shared`, импорты только вниз, публичный API слайса — `index.ts` | `steiger` (`pnpm lint`, `steiger.config.ts`) |
 
-## Контракты
+Все проверки входят в `make test` и CI сабмодуля `backend`.
+
+**Перед кодом — проектирование** (`openspec/specs/design-process`): в `design.md` каждого change обязательна секция «Паттерны» — для новых структур паттерн из каталога GoF с обоснованием и альтернативой (или «без паттерна — почему») и размещение файлов по слоям. Каталог — скилл `gof-design-patterns`, ставится локально:
+
+```bash
+pnpm dlx skills add markpitt/claude-skills --skill gof-design-patterns   # → .agents/skills/ (в репо не идёт)
+```
+
+### Поток запроса (пример `GET /api/ping`)
+
+```
+Presentation (PingController)
+  → QueryBus (Messenger, query.bus)
+    → Application (PingHandler) → порт PingGateway (интерфейс)
+      → Infrastructure (GrpcPingGateway) → gRPC → Go ping
+```
+
+Слои проверяет `deptrac` (`Domain ← Application ← Infrastructure/Presentation`), типы — `phpstan` (level 8), стиль — `php-cs-fixer`.
+
+### Ядро core: четыре правила (ADR)
+
+| Правило | Где | Как проверяется |
+| --- | --- | --- |
+| **Команды/запросы** — только через `CommandBus`/`QueryBus`; хендлер помечен `CommandHandler`/`QueryHandler` | `Shared/Application/Bus` | `_instanceof` в `services.yaml` |
+| **События** — агрегат делает `record()`, `CachedRepository::save()` публикует их в `EventBus` после flush; подписчик = класс с `EventSubscriber` + `__invoke(Event)`. **Межконтекстная связь — только события**: контекст A не импортирует контекст B | `Shared/Application/Event`, `Shared/Infrastructure/Bus/MessengerEventBus` | `tests/Architecture/ContextIsolationTest` |
+| **Ошибки API** — бросай наследника `ApplicationException` (`NotFound`, `ValidationFailed`, `Forbidden`, `Conflict`, `ExternalServiceUnavailable`); `ApiExceptionListener` превращает любое исключение под `/api` в `{code, message, details?}` — та же схема `Error`, что у auth (`backend/openapi/common.yaml`) | `Shared/Application/Exception`, `Shared/Presentation/Http` | `ApiExceptionListenerTest` |
+| **gRPC-адаптеры** наследуют `GrpcGateway`: `$this->call(fn () => $client->Rpc($req, [], self::callOptions())->wait())` — таймаут, статус, `ExternalServiceUnavailable` в одном месте | `Shared/Infrastructure/Grpc` | `GrpcGatewayTest`; `make new-service` генерирует адаптер |
+
+Чего в `Shared` намеренно нет: фабрик репозиториев, декораторов кеша, transactional outbox (`dispatch_after_current_bus` откладывает async-события до коммита), Event Sourcing. Появление класса с суффиксом `Factory`/`Visitor`/`Strategy` — повод для вопроса «зачем» на ревью.
+
+### Контракты
 
 ```bash
 make proto              # gRPC: генерация Go / PHP / Python из backend/proto
@@ -287,7 +359,7 @@ docker run --rm --network gram-designer fullstorydev/grpcurl -plaintext ping:500
 docker run --rm --network gram-designer fullstorydev/grpcurl -plaintext -d '{"message":"hi"}' ping:50051 desigram.ping.v1.PingService/Ping
 ```
 
-## Auth
+### Auth
 
 Флоу (см. `backend/openapi/auth.yaml`):
 
@@ -312,7 +384,7 @@ GET  /api/me  (core)                   Bearer → 200 {id,email}
 
 Код сервиса — по слоям `internal/auth/`: `transport/` (HTTP: `http.go`, `routes.go`, `errors.go`) → `service/` (use-cases, `errors.go`, `token.go`, `password.go`, `metrics.go`; интерфейс `Mailer`) → `store/` (модели, интерфейсы хранилищ, `gorm.go`/`redis.go`/`memory.go`); `adapter/smtp.go` — SMTP-реализация `Mailer`; `config.go` и `cmd/auth/main.go` — только композиция. Новый HTTP-сервис — по образцу auth (генератор `make new-service` — для gRPC).
 
-## Новый микросервис
+### Новый микросервис
 
 ```bash
 make new-service NAME=media
@@ -327,26 +399,6 @@ Go-код — сразу по слоям (`internal/media/{config.go,transport/g
 Python-сервис: скопировать `services/python/telegram/` (`<name>_service/{server,settings,servicer,service,clients/}` + `tests/`), добавить в `members` корневого `pyproject.toml`,
 в `[tool.importlinter]` — пакет в `root_packages` и два контракта по образцу telegram, `uv lock`, создать `enviropment/services/<name>.yml` по образцу `telegram.yml` (`args.SERVICE: <name>`).
 
-## Архитектура кода
-
-У каждого языка — одна фиксированная структура: папки, слои, нейминг. Полные правила со сценариями — спеки `openspec/specs/`, они же — контекст для проектирования в OpenSpec (`/opsx:propose`).
-
-| Язык | Спека | Слои (зависимости только вниз) | Проверка |
-| --- | --- | --- | --- |
-| Symfony core | `architecture-core` | `Presentation/Http → Application/{Command,Query,Port,EventSubscriber} → Domain/{Model,ValueObject,Event,Repository,Exception}`; `Infrastructure/<Tech>/<Tech>*` реализует порты и репозитории | deptrac (слои), `tests/Architecture/ContextIsolationTest` (контексты), `tests/Architecture/NamingConventionTest` (папки, имена, наличие тестов) |
-| Go | `architecture-go-service` | `internal/<name>/transport → service → store`, `adapter/` — внешние системы, `config.go` + `cmd/<name>/main.go` — композиция; тесты только в `tests/<name>/` | `tests/architecture/layers_test.go` (парсит импорты всех сервисов), depguard в `.golangci.yml` |
-| Python | `architecture-python-service` | `<name>_service/servicer → service → clients/`; `service` — без grpc и pb, порты — `Protocol` | `import-linter` (`uv run lint-imports`, контракты в `pyproject.toml`) |
-| Desktop (Electron) | `architecture-desktop` | `src/main` (окно, навигация, deep-links, updater) и `src/preload` (мост) → `src/shared/bridge.ts`; фронт видит только `window.desktop` через `@shared/platform` | eslint `no-restricted-imports` по слоям, vitest (`webPreferences`, политика ссылок), сверка контракта моста с фронтом |
-| Frontend | — (FSD) | `src/_app → _pages → widgets → features → entities → shared`, импорты только вниз, публичный API слайса — `index.ts` | `steiger` (`pnpm lint`, `steiger.config.ts`) |
-
-Все проверки входят в `make test` и CI сабмодуля `backend`.
-
-**Перед кодом — проектирование** (`openspec/specs/design-process`): в `design.md` каждого change обязательна секция «Паттерны» — для новых структур паттерн из каталога GoF с обоснованием и альтернативой (или «без паттерна — почему») и размещение файлов по слоям. Каталог — скилл `gof-design-patterns`, ставится локально:
-
-```bash
-pnpm dlx skills add markpitt/claude-skills --skill gof-design-patterns   # → .agents/skills/ (в репо не идёт)
-```
-
 ### Граф кода (archviz)
 
 Связанность кода можно посмотреть, а не вычитывать из импортов: `make archviz` (стек должен быть поднят, `make dev`) строит графы и открывает их на `https://arch.<domain>` (хост входит в `make cert`):
@@ -357,19 +409,20 @@ pnpm dlx skills add markpitt/claude-skills --skill gof-design-patterns   # → .
 
 Только dev: сервисы `archviz-render` (образ `enviropment/archviz/`) и `archviz` (nginx) живут под профилем `archviz` в `docker-compose.dev.yml` и не поднимаются в `make dev`. Результат — статические svg/html в `var/archviz/` (в git не идёт); упавший генератор помечается на индексе с логом, остальные графы собираются. Новые сервисы подхватываются автоматически (`cmd/*`, `members`).
 
-## Десктоп
+### Спеки (OpenSpec)
 
-Приложение для macOS / Windows / Linux — сабмодуль `desktop/`: Electron-окно загружает сайт по URL (как Figma), никакого бандла фронта внутри — один деплой фронта обновляет и сайт, и приложение. Нативное: окно с памятью размера, меню, внешние ссылки в системный браузер, навигация только в своём origin, deep-links `gram-designer://…`, автообновление из GitHub Releases, экран «нет соединения». Мост — `window.desktop` (`platform`, `version`, `openExternal`, `onDeepLink`) через `contextBridge`; фронт обращается к нему только через `src/shared/platform` (`isDesktop()`, `openExternal()`), тип-копия `desktop.d.ts` сверяется тестом в `desktop`. Спеки — `openspec/specs/{desktop-shell,desktop-bridge,desktop-release,architecture-desktop}`.
+Изменения побольше одного коммита проходят через [OpenSpec](https://github.com/Fission-AI/OpenSpec): `openspec/specs/` — текущее поведение системы по доменам, `openspec/changes/<name>/` — предложение (`proposal → specs → design → tasks`), после реализации архивируется и вливается в `specs/`.
+Контекст проекта и правила артефактов — `openspec/config.yaml`; команды Claude Code — `.claude/commands/opsx/*`.
 
 ```bash
-cd desktop && pnpm install && pnpm dev     # против https://gram-designer.localhost:8443 (make dev + make cert)
-pnpm build                                 # установщик для своей ОС → desktop/dist/
-git tag v0.2.0 && git push --tags          # release.yml → dmg / exe / AppImage в GitHub Releases; сайт /download ведёт на них
+pnpm add -g @fission-ai/openspec@latest   # один раз
+/opsx:propose "идея"                      # в Claude Code: proposal + specs + design + tasks
+/opsx:apply                               # реализовать по tasks
+/opsx:archive                             # влить дельты в openspec/specs/
+openspec list && openspec validate --all  # что в работе, всё ли валидно
 ```
 
-Ограничения: сборки **не подписаны** (нет Apple Developer / сертификата Windows) — ОС предупреждает при установке, на macOS автообновление невозможно (приложение предлагает скачать новую версию); офлайн-старт без сети — после local-first.
-
-## Тесты и CI
+## 8. Проверки: тесты, CI, нагрузка
 
 «Сломает ли мой код что-нибудь» отвечают слои, каждый ловит свой класс поломок. Всё гоняется на PR в GitHub Actions и локально теми же командами.
 
@@ -387,7 +440,7 @@ git tag v0.2.0 && git push --tags          # release.yml → dmg / exe / AppImag
 
 E2E в CI собирает образы через `docker buildx bake` с GHA-кешем: первый прогон долгий (grpc-расширение), дальше минуты. Для приватных сабмодулей нужен secret `SUBMODULES_TOKEN` (PAT с `repo`). k6 умеет слать метрики в Prometheus стека metrika — secret `K6_PROMETHEUS_RW_SERVER_URL`.
 
-## Нагрузка
+### Нагрузка
 
 Что уже заложено и как крутить при росте:
 
@@ -405,19 +458,30 @@ E2E в CI собирает образы через `docker buildx bake` с GHA-�
 (в `.env` это просто другие хосты), и перейти с compose на Swarm/K8s — контракты, образы и
 структура сервисов при этом не меняются.
 
-## Спеки (OpenSpec)
+## 9. Безопасность
 
-Изменения побольше одного коммита проходят через [OpenSpec](https://github.com/Fission-AI/OpenSpec): `openspec/specs/` — текущее поведение системы по доменам, `openspec/changes/<name>/` — предложение (`proposal → specs → design → tasks`), после реализации архивируется и вливается в `specs/`.
-Контекст проекта и правила артефактов — `openspec/config.yaml`; команды Claude Code — `.claude/commands/opsx/*`.
+По [MDN Practical security implementation guides](https://developer.mozilla.org/en-US/docs/Web/Security/Practical_implementation_guides). Заголовки — **одно место**: `enviropment/traefik/dynamic/headers.yml` (middlewares Traefik), роутеры подключают их в compose.
 
-```bash
-pnpm add -g @fission-ai/openspec@latest   # один раз
-/opsx:propose "идея"                      # в Claude Code: proposal + specs + design + tasks
-/opsx:apply                               # реализовать по tasks
-/opsx:archive                             # влить дельты в openspec/specs/
-openspec list && openspec validate --all  # что в работе, всё ли валидно
-```
+| MDN | Как сделано |
+| --- | --- |
+| TLS, редирект на HTTPS | Traefik: dev — mkcert, prod — Let's Encrypt (`certresolver=le` на core/auth/frontend); `web` → `websecure` редирект |
+| HSTS | middleware `hsts` (2 года, includeSubDomains, preload) — только prod; на `*.localhost` намеренно нет |
+| Clickjacking | `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'` (для Telegram Mini App добавить `https://web.telegram.org`) |
+| CSP | frontend: `app-csp` (`default-src 'self'`, `object-src 'none'`, `base-uri 'none'`, `form-action 'self'`, `'wasm-unsafe-eval'` + `worker-src blob:` под SQLite WASM; dev — `app-csp-dev` с `'unsafe-eval'`/`ws:` для HMR). API: `default-src 'none'`. **Долг**: `script-src 'unsafe-inline'` — заменить на nonce в Next.js `proxy.ts` |
+| MIME sniffing | `X-Content-Type-Options: nosniff` |
+| Referrer | `strict-origin-when-cross-origin` |
+| CORS | auth — middleware `api-cors` (origin = `https://<domain>`); core — `nelmio/cors-bundle`, тот же origin из `CORS_ALLOW_ORIGIN` |
+| CORP / COOP | `Cross-Origin-Resource-Policy: same-site`, `Cross-Origin-Opener-Policy: same-origin` |
+| Permissions-Policy | камера, микрофон, геолокация, платежи, USB — выключены |
+| Cookies | не используются: auth — Bearer JWT (15 мин) + refresh в теле; при переносе refresh в cookie — `Secure; HttpOnly; SameSite=Strict` |
+| Rate limit | Traefik per-IP: core 50 r/s, auth 10 r/s; в auth — лимиты на коды и неудачные логины (Redis) |
+| Секреты | ansible-vault; `JWT_SECRET` ≥ 32 байт проверяется auth на старте; в логи не пишутся |
+| Контейнеры | `no-new-privileges` на всех сервисах; docker.sock у Traefik read-only; наружу проброшены только 80/443 (prod), остальное — внутренняя сеть |
+| Сервер | `make bootstrap`: ssh только по ключу и только `deploy`, root закрыт, ufw (22 limit/80/443), fail2ban, unattended security upgrades, sysctl |
+| Dashboards | Traefik/RabbitMQ/Grafana/Prometheus/Jaeger/Mailpit — только в `docker-compose.dev.yml`, в prod не публикуются |
+
+Проверить: `curl -sI https://api.<domain>/health | grep -iE "strict|content-security|x-frame|nosniff|referrer|permissions|cross-origin"`; для фронта — [securityheaders.com](https://securityheaders.com) после деплоя.
 
 ## Лицензия
 
-MIT — см. [LICENSE](LICENSE). Все репозитории проекта (backend, env, front) под той же лицензией.
+MIT — см. [LICENSE](LICENSE). Все репозитории проекта (backend, env, front, desktop) под той же лицензией.

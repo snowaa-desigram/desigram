@@ -32,5 +32,5 @@
 
 ## 6. Проверка пользователем
 
-- [ ] 6.1 `cd desktop && pnpm install && pnpm dev` при поднятом `make dev` — окно с локальным сайтом, внешняя ссылка уходит в браузер
-- [ ] 6.2 `git tag v0.1.0 && git push --tags` в `desktop` — Release с dmg/exe/AppImage; установка на своей ОС; `/download` ведёт на файлы
+- [x] 6.1 `cd desktop && pnpm install && pnpm dev` при поднятом `make dev` — окно с локальным сайтом, внешняя ссылка уходит в браузер
+- [x] 6.2 `git tag v0.1.0 && git push --tags` в `desktop` — Release с dmg/exe/AppImage; установка на своей ОС; `/download` ведёт на файлы
