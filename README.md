@@ -1,4 +1,6 @@
-# Desigram
+# Gram Designer
+
+Редактор макетов с автоотправкой в Telegram. Кодовое имя репозиториев и внутренних идентификаторов — `desigram` (см. «Имя проекта и домен»).
 
 ```bash
 git clone --recurse-submodules git@github.com:snowaa-desigram/desigram.git
@@ -9,9 +11,9 @@ git clone --recurse-submodules git@github.com:snowaa-desigram/desigram.git
 ```mermaid
 flowchart LR
     U((Клиент)) -->|HTTPS| T[Traefik<br/>TLS · LB · rate-limit]
-    T -->|desigram.*| F[Next.js]
-    T -->|api.desigram.*| C[Symfony core · DDD<br/>реплики ×N]
-    T -->|api.desigram.*/api/auth| A[Go: auth · go-zero rest<br/>JWT HS256 ×N]
+    T -->|gram-designer.*| F[Next.js]
+    T -->|api.gram-designer.*| C[Symfony core · DDD<br/>реплики ×N]
+    T -->|api.gram-designer.*/api/auth| A[Go: auth · go-zero rest<br/>JWT HS256 ×N]
     A -->|SMTP| M[Mailpit / SMTP]
     A --> R
     A -.->|miss| DB
@@ -99,16 +101,17 @@ tests/load/api.js        # k6-сценарий «200 онлайн»
 | `app_name` | имя продукта для людей | тема писем auth (`APP_NAME`), `NEXT_PUBLIC_APP_NAME` во фронте |
 | `project_name` | техническое имя | docker-сеть, имена образов `<project_name>/core`, папка деплоя `/opt/<project_name>`, `make new-service` |
 
-```bash
-# пример переезда на gram-designer.com
-#   all.yml:   project_name: gramdesigner   app_name: Gram Designer
-#   prod.yml:  domain: gram-designer.com
-#   local.yml: domain: gram-designer.localhost
-make configure && make cert && make dev
+```yaml
+# текущие значения
+# all.yml:   project_name: gram-designer   app_name: Gram Designer
+# prod.yml:  domain: gram-designer.com
+# local.yml: domain: gram-designer.localhost
 ```
 
-Что не переименовывается автоматически (и не должно): Go-модуль `github.com/snowaa-desigram/...`, proto-пакеты `desigram.*.v1`,
-PHP-namespace `Desigram\` в gen, `desigram-common` в Python, issuer JWT `desigram-auth` — это внутренние идентификаторы кода, пользователь их не видит.
+После смены любого из них: `make configure && make cert && make dev` (образы перетегируются из кеша, сеть пересоздастся; volume'ы с данными остаются).
+
+Что не переименовывается (и не должно): GitHub-репозитории `snowaa-desigram/*`, Go-модуль `github.com/snowaa-desigram/...`, proto-пакеты `desigram.*.v1`,
+PHP-namespace `Desigram\` в gen, `desigram-common` в Python, issuer JWT `desigram-auth`, креды MySQL/RabbitMQ `desigram` по умолчанию — это внутренние идентификаторы кода и инфраструктуры, пользователь их не видит.
 
 ```bash
 make configure          # group_vars -> enviropment/.env (локально)
@@ -117,7 +120,7 @@ make deploy             # prod-серверы из inventory: docker + git clone
 
 ## Как пользоваться (локально)
 
-Стек живёт в Docker за Traefik на **https://\*.desigram.localhost:8443** (80/443 заняты другим Docker). Всё, что ниже, — с нуля до работающего стека.
+Стек живёт в Docker за Traefik на **https://\*.gram-designer.localhost:8443** (80/443 заняты другим Docker). Всё, что ниже, — с нуля до работающего стека.
 
 ### 1. Что нужно на машине
 
@@ -130,7 +133,7 @@ make deploy             # prod-серверы из inventory: docker + git clone
 ### 2. Первый запуск
 
 ```bash
-git clone --recurse-submodules git@github.com:snowaa-desigram/desigram.git && cd desigram
+git clone --recurse-submodules git@github.com:snowaa-desigram/desigram.git gram-designer && cd gram-designer
 make configure   # group_vars -> enviropment/.env
 make cert        # mkcert -install (один раз, спросит пароль) + сертификат на все хосты из .env
 make dev         # сборка образов + compose up
@@ -142,20 +145,20 @@ make dev         # сборка образов + compose up
 
 ### 3. Где что
 
-Для `domain: desigram.localhost` (дефолт `local.yml`; сменил домен — все адреса ниже меняются вместе с ним):
+Для `domain: gram-designer.localhost` (дефолт `local.yml`; прод — `gram-designer.com` в `prod.yml`; сменил домен — все адреса ниже меняются вместе с ним):
 
 | Что        | Где                                          |
 | ---------- | -------------------------------------------- |
-| Сайт       | https://desigram.localhost:8443              |
-| API        | https://api.desigram.localhost:8443/api/ping |
-| Auth       | https://api.desigram.localhost:8443/api/auth/* (напрямую, без Traefik: http://127.0.0.1:8090) |
-| Почта (dev)| https://mail.desigram.localhost:8443 — Mailpit: сюда падают все письма (коды подтверждения) |
-| Профайлер  | https://api.desigram.localhost:8443/_profiler |
-| Traefik    | https://traefik.desigram.localhost:8443/dashboard/ — роутеры, здоровье бэкендов |
-| Grafana    | https://grafana.desigram.localhost:8443 (admin/admin), дашборд **Auth** уже на месте |
-| Prometheus | https://prometheus.desigram.localhost:8443   |
-| Jaeger     | https://jaeger.desigram.localhost:8443 — трейсы core → gRPC, auth |
-| RabbitMQ   | https://rabbitmq.desigram.localhost:8443 (desigram/desigram), AMQP 127.0.0.1:5673 |
+| Сайт       | https://gram-designer.localhost:8443              |
+| API        | https://api.gram-designer.localhost:8443/api/ping |
+| Auth       | https://api.gram-designer.localhost:8443/api/auth/* (напрямую, без Traefik: http://127.0.0.1:8090) |
+| Почта (dev)| https://mail.gram-designer.localhost:8443 — Mailpit: сюда падают все письма (коды подтверждения) |
+| Профайлер  | https://api.gram-designer.localhost:8443/_profiler |
+| Traefik    | https://traefik.gram-designer.localhost:8443/dashboard/ — роутеры, здоровье бэкендов |
+| Grafana    | https://grafana.gram-designer.localhost:8443 (admin/admin), дашборд **Auth** уже на месте |
+| Prometheus | https://prometheus.gram-designer.localhost:8443   |
+| Jaeger     | https://jaeger.gram-designer.localhost:8443 — трейсы core → gRPC, auth |
+| RabbitMQ   | https://rabbitmq.gram-designer.localhost:8443 (desigram/desigram), AMQP 127.0.0.1:5673 |
 | MySQL      | 127.0.0.1:3307 (desigram/desigram)           |
 | Redis      | 127.0.0.1:6380                               |
 | gRPC ping / telegram | 127.0.0.1:50051 / 50052            |
@@ -163,12 +166,12 @@ make dev         # сборка образов + compose up
 ### 4. Проверить auth руками
 
 ```bash
-API=https://api.desigram.localhost:8443/api/auth
+API=https://api.gram-designer.localhost:8443/api/auth
 curl -s -X POST $API/register -H 'Content-Type: application/json' -d '{"email":"me@example.com","password":"password-123"}'
-# → 202; код — в https://mail.desigram.localhost:8443 (или: curl -s http://127.0.0.1:8025/api/v1/messages | jq)
+# → 202; код — в https://mail.gram-designer.localhost:8443 (или: curl -s http://127.0.0.1:8025/api/v1/messages | jq)
 curl -s -X POST $API/register/confirm -H 'Content-Type: application/json' -d '{"email":"me@example.com","code":"123456"}'
 # → {"accessToken":"…","refreshToken":"…","expiresIn":900}
-curl -s https://api.desigram.localhost:8443/api/me -H "Authorization: Bearer <accessToken>"
+curl -s https://api.gram-designer.localhost:8443/api/me -H "Authorization: Bearer <accessToken>"
 # → {"id":"…","email":"me@example.com"}   (core проверил JWT от auth)
 ```
 
@@ -201,7 +204,7 @@ XDEBUG_MODE=debug make dev   # xdebug -> IDE на 9003
 | `TLS handshake timeout` / `EOF` при `load metadata` | сеть до registry | повторить `make dev` — слои кешируются |
 | Grafana `Exited (1)`, `Datasource provisioning error` | старый volume `grafana_data` | уже обработано (`deleteDatasources`); если повторится — `docker volume rm enviropment_grafana_data` |
 | Frontend `Restarting` с `ERR_PNPM_…` | `node_modules` в контейнере разошёлся с lock'ом | `docker compose … up -d --force-recreate -V frontend` (пересоздать anonymous volume) |
-| 503/504 через Traefik сразу после `make dev` | бэкенд ещё не прошёл healthcheck | подождать 10–20 с; https://traefik.desigram.localhost:8443/dashboard/ → Services покажет `UP` |
+| 503/504 через Traefik сразу после `make dev` | бэкенд ещё не прошёл healthcheck | подождать 10–20 с; https://traefik.gram-designer.localhost:8443/dashboard/ → Services покажет `UP` |
 | Полный сброс | — | `make down && docker volume rm $(docker volume ls -q \| grep ^enviropment_) && make dev` |
 
 `docker compose …` здесь = `docker compose -f enviropment/docker-compose.yml -f enviropment/docker-compose.dev.yml`.
@@ -221,8 +224,8 @@ make openapi            # HTTP: backend/openapi/{common,auth}.yaml -> services/g
 Проверить сервис вручную (reflection включён):
 
 ```bash
-docker run --rm --network desigram fullstorydev/grpcurl -plaintext ping:50051 list
-docker run --rm --network desigram fullstorydev/grpcurl -plaintext -d '{"message":"hi"}' ping:50051 desigram.ping.v1.PingService/Ping
+docker run --rm --network gram-designer fullstorydev/grpcurl -plaintext ping:50051 list
+docker run --rm --network gram-designer fullstorydev/grpcurl -plaintext -d '{"message":"hi"}' ping:50051 desigram.ping.v1.PingService/Ping
 ```
 
 ## Auth

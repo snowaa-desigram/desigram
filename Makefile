@@ -4,8 +4,8 @@ PROD    = $(COMPOSE) -f enviropment/docker-compose.prod.yml
 # Домен/имя проекта — из enviropment/.env (генерируется make configure из group_vars); до configure — дефолты
 ENV_FILE = enviropment/.env
 env      = $(or $(shell test -f $(ENV_FILE) && sed -n 's/^$(1)=//p' $(ENV_FILE) | tr -d '"'),$(2))
-DOMAIN   = $(call env,DOMAIN,desigram.localhost)
-PROJECT  = $(call env,PROJECT_NAME,desigram)
+DOMAIN   = $(call env,DOMAIN,gram-designer.localhost)
+PROJECT  = $(call env,PROJECT_NAME,gram-designer)
 API_URL  = $(call env,PUBLIC_API_URL,https://api.$(DOMAIN):8443)
 # все хосты за Traefik — для mkcert
 DOMAINS ?= $(DOMAIN) $(addsuffix .$(DOMAIN),api traefik grafana prometheus jaeger rabbitmq mail)

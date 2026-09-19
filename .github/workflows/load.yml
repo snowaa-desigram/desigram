@@ -7,7 +7,7 @@ on:
       target:
         description: "Базовый URL API (https://api.<domain>)"
         required: true
-        default: https://api.desigram.com
+        default: https://api.gram-designer.com
   # schedule:
   #   - cron: "0 4 * * 1"   # понедельник 04:00 UTC
 
