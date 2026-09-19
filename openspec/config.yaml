@@ -1,0 +1,62 @@
+schema: spec-driven
+
+context: |
+  Language: ru
+  All artifacts must be written in ru.
+  Keep OpenSpec structural headings and SHALL/MUST keywords in English.
+
+  Проект: Gram Designer — монорепо из трёх git-сабмодулей (backend/, enviropment/, frontend/).
+  Полное описание архитектуры и правил — корневой README.md (разделы «Архитектура»,
+  «Ядро core: четыре правила (ADR)», «Новый микросервис», «Тесты и CI»). Читай его перед design.
+
+  Стек и границы:
+  - Traefik — единственная точка входа (TLS, LB, rate-limit).
+  - backend/core — Symfony 7.4, PHP 8.4, DDD: src/<Context>/{Domain,Application,Infrastructure,Presentation} + src/Shared.
+    Stateless, реплики. Команды/запросы только через CommandBus/QueryBus. Межконтекстная связь — только события.
+    Ошибки API — наследники ApplicationException. gRPC-адаптеры наследуют GrpcGateway.
+    В SQL ходим только через Redis (CachedRepository). Тяжёлые команды — в async-транспорт Messenger (RabbitMQ), HTTP отвечает 202.
+    В Shared намеренно нет фабрик/визиторов/стратегий/outbox/ES — новый Factory/Visitor/Strategy требует обоснования.
+  - backend/services/go — один модуль, go-zero (zrpc для gRPC, rest для auth), GORM, линейная архитектура,
+    cmd/<name>/{main.go,etc/<name>.yaml}, internal/<name>/, тесты отдельно в tests/<name>/.
+  - backend/services/python — uv-workspace, общий пакет desigram-common (serve(), Settings).
+  - Контракты — единственный источник правды: gRPC → backend/proto (buf), HTTP → backend/openapi/*.yaml
+    (oapi-codegen для Go, openapi-typescript для фронта). Сгенерированный код коммитится, CI проверяет, что он не отстал.
+  - Микросервисы внутренние, только gRPC; наружу торчит только auth (api.<domain>/api/auth/*).
+  - enviropment/ — compose (include services/*.yml) + Ansible как единая точка настройки и деплоя.
+  - frontend/ — Next.js, FSD (steiger); ходит на api.<domain> из браузера, в http://core:8080 из SSR.
+  - Новый микросервис создаётся через `make new-service NAME=<name>` (не руками).
+
+  Проверки (гоняются в CI и локально теми же командами): make proto-lint / proto-breaking / openapi,
+  make core-lint / core-test, golangci-lint run, make test, make dev && make e2e, make load.
+
+  Ограничения работы: docker build / docker compose up НЕ запускать — пользователь собирает сам.
+
+rules:
+  proposal:
+    - Указывай, какие сабмодули затрагиваются (backend / enviropment / frontend) — коммиты идут в каждый отдельно
+    - Если меняется контракт (proto / OpenAPI) — выноси это отдельным пунктом — контракт правится первым, код генерируется из него
+    - Обязательна секция "Non-goals"
+  design:
+    - "Обязательна секция «## Паттерны»: для каждой новой нетривиальной структуры — паттерн из каталога GoF с обоснованием и альтернативой, либо «без паттерна — почему». Перед этим прочитай .agents/skills/gof-design-patterns/SKILL.md и resources/pattern-selection-guide.md (если папки нет — pnpm dlx skills add markpitt/claude-skills --skill gof-design-patterns)"
+    - Для каждого затрагиваемого сервиса перечисли новые/изменяемые файлы с путями по спеке его языка (openspec/specs/architecture-core, architecture-go-service, architecture-python-service)
+    - Для core — назови bounded context и слои (Domain/Application/Infrastructure/Presentation), которые затрагиваются
+    - Если нужна связь между контекстами — только через события; покажи, какое событие и кто подписчик
+    - Если нужен новый внешний вызов из core — порт в Application/Port + адаптер на GrpcGateway + фейк в tests/Fake
+    - Новые классы с суффиксом Factory/Visitor/Strategy/Decorator в Shared — отдельный пункт в «Паттернах» с ≥2 контекстами, где это нужно, или не добавляй
+  specs:
+    - Требования формулируй так, чтобы их можно было проверить существующими слоями тестов (контракты / архитектура / unit / e2e)
+  tasks:
+    - Первой задачей — изменение контракта и генерация кода (make proto / make openapi), если контракт меняется
+    - Последней задачей в каждом сабмодуле — соответствующая проверка (make core-lint core-test / golangci-lint / make test)
+    - Не включай задачи "собрать образ" / "поднять стек" — это делает пользователь
+
+operations:
+  apply:
+    guidance:
+      - Перед правкой файлов сервиса перечитай спеку архитектуры его языка (openspec/specs/architecture-*) — папки, слои, нейминг оттуда, не по памяти
+      - Новые Go/Python-сервисы — только через make new-service / копию образца, затем проверь дерево по спеке
+      - Работай в одном сабмодуле за раз; в конце сообщай, в каких сабмодулях есть незакоммиченные изменения
+      - Не запускай docker build / docker compose up
+  archive:
+    guidance:
+      - Перед архивом убедись, что сгенерированный код (gen/, *.d.ts) не отстал от контракта

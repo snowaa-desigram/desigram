@@ -40,20 +40,35 @@ message PingResponse {
 }
 PROTO
 
-# ---------- go (go-zero zrpc) ----------
-log "services/go/cmd/$NAME, services/go/internal/$NAME"
-mkdir -p "$BACKEND/services/go/cmd/$NAME/etc" "$BACKEND/services/go/internal/$NAME"
-cat > "$BACKEND/services/go/internal/$NAME/config.go" <<GO
+# ---------- go (go-zero zrpc), слои по openspec/specs/architecture-go-service ----------
+log "services/go/cmd/$NAME, services/go/internal/$NAME/{transport,service}, tests/$NAME"
+GOSVC="$BACKEND/services/go"
+mkdir -p "$GOSVC/cmd/$NAME/etc" "$GOSVC/internal/$NAME/transport" "$GOSVC/internal/$NAME/service" "$GOSVC/tests/$NAME"
+cat > "$GOSVC/internal/$NAME/config.go" <<GO
 package $NAME
 
 import "github.com/zeromicro/go-zero/zrpc"
 
+// Config сервиса: zrpc.RpcServerConf даёт ListenOn, Mode, Log, Prometheus, Telemetry, Health и т.д.
 type Config struct {
 	zrpc.RpcServerConf
 }
 GO
-cat > "$BACKEND/services/go/internal/$NAME/server.go" <<GO
-package $NAME
+cat > "$GOSVC/internal/$NAME/service/service.go" <<GO
+package service
+
+// Service — use-cases $NAME. Заглушка: отвечает pong.
+type Service struct{}
+
+func New() *Service { return &Service{} }
+
+// Ping возвращает ответ на сообщение.
+func (s *Service) Ping(message string) string {
+	return "pong: " + message
+}
+GO
+cat > "$GOSVC/internal/$NAME/transport/grpc.go" <<GO
+package transport
 
 import (
 	"context"
@@ -61,39 +76,44 @@ import (
 	"github.com/zeromicro/go-zero/core/logx"
 
 	${NAME}v1 "github.com/snowaa-desigram/backend/services/go/gen/desigram/$NAME/v1"
+	"github.com/snowaa-desigram/backend/services/go/internal/$NAME/service"
 )
 
+// Server — gRPC-вход ${PASCAL}Service: pb → Service → pb.
 type Server struct {
 	${NAME}v1.Unimplemented${PASCAL}ServiceServer
+	svc *service.Service
 }
 
-func NewServer() *Server {
-	return &Server{}
+func NewServer(svc *service.Service) *Server {
+	return &Server{svc: svc}
 }
 
 func (s *Server) Ping(ctx context.Context, req *${NAME}v1.PingRequest) (*${NAME}v1.PingResponse, error) {
 	logx.WithContext(ctx).Infof("$NAME: %s", req.GetMessage())
 
 	return &${NAME}v1.PingResponse{
-		Message: "pong: " + req.GetMessage(),
+		Message: s.svc.Ping(req.GetMessage()),
 		Service: "$NAME",
 	}, nil
 }
 GO
-cat > "$BACKEND/services/go/cmd/$NAME/main.go" <<GO
+cat > "$GOSVC/cmd/$NAME/main.go" <<GO
 package main
 
 import (
 	"flag"
 
 	"github.com/zeromicro/go-zero/core/conf"
-	"github.com/zeromicro/go-zero/core/service"
+	zservice "github.com/zeromicro/go-zero/core/service"
 	"github.com/zeromicro/go-zero/zrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
 	${NAME}v1 "github.com/snowaa-desigram/backend/services/go/gen/desigram/$NAME/v1"
 	"github.com/snowaa-desigram/backend/services/go/internal/$NAME"
+	"github.com/snowaa-desigram/backend/services/go/internal/$NAME/service"
+	"github.com/snowaa-desigram/backend/services/go/internal/$NAME/transport"
 )
 
 var configFile = flag.String("f", "etc/$NAME.yaml", "config file")
@@ -105,9 +125,9 @@ func main() {
 	conf.MustLoad(*configFile, &c, conf.UseEnv())
 
 	s := zrpc.MustNewServer(c.RpcServerConf, func(grpcServer *grpc.Server) {
-		${NAME}v1.Register${PASCAL}ServiceServer(grpcServer, $NAME.NewServer())
+		${NAME}v1.Register${PASCAL}ServiceServer(grpcServer, transport.NewServer(service.New()))
 
-		if c.Mode == service.DevMode || c.Mode == service.TestMode {
+		if c.Mode == zservice.DevMode || c.Mode == zservice.TestMode {
 			reflection.Register(grpcServer)
 		}
 	})
@@ -116,7 +136,46 @@ func main() {
 	s.Start()
 }
 GO
-cat > "$BACKEND/services/go/cmd/$NAME/etc/$NAME.yaml" <<YML
+cat > "$GOSVC/tests/$NAME/service_test.go" <<GO
+package ${NAME}_test
+
+import (
+	"testing"
+
+	"github.com/snowaa-desigram/backend/services/go/internal/$NAME/service"
+)
+
+func TestServicePing(t *testing.T) {
+	if got, want := service.New().Ping("hi"), "pong: hi"; got != want {
+		t.Errorf("Ping = %q, want %q", got, want)
+	}
+}
+GO
+cat > "$GOSVC/tests/$NAME/transport_test.go" <<GO
+package ${NAME}_test
+
+import (
+	"context"
+	"testing"
+
+	${NAME}v1 "github.com/snowaa-desigram/backend/services/go/gen/desigram/$NAME/v1"
+	"github.com/snowaa-desigram/backend/services/go/internal/$NAME/service"
+	"github.com/snowaa-desigram/backend/services/go/internal/$NAME/transport"
+)
+
+func TestPing(t *testing.T) {
+	resp, err := transport.NewServer(service.New()).Ping(context.Background(), &${NAME}v1.PingRequest{Message: "hi"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, want := resp.GetMessage(), "pong: hi"; got != want {
+		t.Errorf("message = %q, want %q", got, want)
+	}
+}
+GO
+# depguard: service не импортирует transport (правило на сервис — pkg-префиксы не умеют «тот же сервис»)
+perl -0pi -e "s|(        ping-service:\n          files: \[\"\*\*/internal/ping/service/\*\*\"\]\n          deny:\n(?:            .*\n)+)|\$1        $NAME-service:\n          files: [\"**/internal/$NAME/service/**\"]\n          deny:\n            - pkg: github.com/snowaa-desigram/backend/services/go/internal/$NAME/transport\n              desc: \"service не импортирует transport\"\n|" "$GOSVC/.golangci.yml"
+cat > "$GOSVC/cmd/$NAME/etc/$NAME.yaml" <<YML
 # go-zero zrpc: https://go-zero.dev/docs/tutorials/grpc/server/configuration
 Name: $NAME.rpc
 ListenOn: 0.0.0.0:50051
@@ -252,7 +311,8 @@ cat <<MSG
 
 Готово: сервис "$NAME".
   proto:    backend/proto/desigram/$NAME/v1/$NAME.proto
-  go:       backend/services/go/cmd/$NAME/{main.go,etc/$NAME.yaml}, internal/$NAME
+  go:       backend/services/go/cmd/$NAME/{main.go,etc/$NAME.yaml}, internal/$NAME/{config.go,transport,service}, tests/$NAME
+            (слои — openspec/specs/architecture-go-service: transport → service → store; проверка — go test ./tests/architecture)
   compose:  enviropment/services/$NAME.yml (подключён в docker-compose.yml)
   env:      ${UPPER}_GRPC_ADDR, ${UPPER}_REPLICAS
 

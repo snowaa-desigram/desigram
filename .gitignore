@@ -4,3 +4,5 @@ plans/
 # локальные скиллы Claude, в репо не идут
 .agents/
 skills-lock.json
+# графы make archviz и прочий локальный вывод
+var/

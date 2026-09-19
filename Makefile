@@ -8,7 +8,7 @@ DOMAIN   = $(call env,DOMAIN,gram-designer.localhost)
 PROJECT  = $(call env,PROJECT_NAME,gram-designer)
 API_URL  = $(call env,PUBLIC_API_URL,https://api.$(DOMAIN):8443)
 # все хосты за Traefik — для mkcert
-DOMAINS ?= $(DOMAIN) $(addsuffix .$(DOMAIN),api traefik grafana prometheus jaeger rabbitmq mail)
+DOMAINS ?= $(DOMAIN) $(addsuffix .$(DOMAIN),api traefik grafana prometheus jaeger rabbitmq mail arch)
 BUF_IMG = $(PROJECT)/buf
 BUF     = docker run --rm -v "$(CURDIR)/backend":/workspace $(BUF_IMG)
 # пароль vault: enviropment/ansible/.vault-pass (gitignored), если есть; в CI — из секрета ANSIBLE_VAULT_PASSWORD
@@ -95,7 +95,13 @@ test:                 ## unit/интеграционные тесты всех �
 	$(DEV) exec core composer lint && $(DEV) exec core composer test
 	cd backend/services/go && go vet ./... && go test ./...
 	docker run --rm -v "$(CURDIR)/backend/services/python":/app -w /app ghcr.io/astral-sh/uv:python3.13-bookworm-slim \
-		sh -c "uv sync --frozen --all-packages -q && uv run --no-sync ruff check . && uv run --no-sync pytest -q"
+		sh -c "uv sync --frozen --all-packages -q && uv run --no-sync ruff check . && uv run --no-sync lint-imports && uv run --no-sync pytest -q"
+
+archviz:              ## графы зависимостей и вызовов → https://arch.<domain> (make dev перед этим; профиль archviz)
+	mkdir -p var/archviz/core var/archviz/go var/archviz/python
+	$(DEV) exec core sh -c 'vendor/bin/deptrac analyse --formatter=graphviz-dot --output=/archviz/layers.dot --no-progress >/dev/null && vendor/bin/phpmetrics --report-html=/archviz/metrics src >/dev/null'
+	$(DEV) --profile archviz run --rm archviz-render; rc=$$?; $(DEV) --profile archviz up -d archviz; \
+		echo "https://arch.$(DOMAIN)"; exit $$rc
 
 e2e:                  ## сквозная проверка поднятого стека (make dev перед этим)
 	./scripts/e2e.sh

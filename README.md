@@ -35,7 +35,7 @@ flowchart LR
 - **Redis** — только кеш. **В SQL ходим только через Redis**: Doctrine query/result/second-level cache живут в Redis во всех окружениях, репозитории наследуют `Shared/Infrastructure/Persistence/Doctrine/CachedRepository` (`remember()` — чтение через кеш, `save()/forget()` — запись + инвалидация, `cachedQuery()` — выборки с result cache). MySQL видит только промахи кеша и записи.
 - **RabbitMQ** — очередь. Тяжёлые команды (например `SendPhotoCommand`) уходят в `async`-транспорт Messenger (AMQP), HTTP отвечает `202`, выполняет `core-worker`; retry ×3, упавшие — в `failed`.
 - **Микросервисы** (`backend/services/*`) — внутренние, только gRPC (исключение — auth, см. выше).
-  - Go: один модуль, бинарник на сервис (`cmd/<name>/main.go` + `etc/<name>.yaml`, `internal/<name>/`), тесты — отдельно в `tests/<name>/`. Каркас — [go-zero](https://go-zero.dev): `zrpc` для gRPC-сервисов, `rest` для auth (HTTP + JWT-middleware). zrpc: конфиг из YAML с `${ENV}`, логирование, health, Prometheus (`:9091/metrics`), OpenTelemetry-трейсы (в dev — в Jaeger), graceful shutdown; в `Mode: dev|test` включён gRPC reflection.
+  - Go: один модуль, бинарник на сервис (`cmd/<name>/main.go` + `etc/<name>.yaml`), слои `internal/<name>/{transport,service,store,adapter}` (см. «Архитектура кода»), тесты — отдельно в `tests/<name>/`. Каркас — [go-zero](https://go-zero.dev): `zrpc` для gRPC-сервисов, `rest` для auth (HTTP + JWT-middleware). zrpc: конфиг из YAML с `${ENV}`, логирование, health, Prometheus (`:9091/metrics`), OpenTelemetry-трейсы (в dev — в Jaeger), graceful shutdown; в `Mode: dev|test` включён gRPC reflection.
   - Python: uv-workspace `services/python/` — общий пакет `desigram-common` (`serve()`: health, reflection, логи, graceful shutdown, `Settings` из env) + сервисы (`telegram`).
 - **Контракты**: gRPC — `backend/proto` (генерация `buf` локальными плагинами, образ `enviropment/buf`); HTTP — `backend/openapi/*.yaml` (`common.yaml` — общая схема `Error`, `auth.yaml` — auth; Go-типы через `oapi-codegen`, фронт — `openapi-typescript`). Контракт — единственный источник правды для всех языков; код из него генерируется и коммитится, CI проверяет, что он не отстал.
 - **Frontend** (Next.js) — отдельный контейнер за Traefik. Из браузера ходит на `api.<domain>` (CORS в core через `nelmio/cors-bundle`, origin = `https://<domain>`), из SSR — напрямую в `http://core:8080` (`API_URL_INTERNAL`).
@@ -69,8 +69,8 @@ backend/                 # git submodule
   proto/                 # gRPC-контракты (buf)
   openapi/               # HTTP-контракты (OpenAPI 3.1): common.yaml (Error), auth.yaml
   core/                  # Symfony 7.4 LTS, PHP 8.4, FrankenPHP
-  services/go/           # Go-сервисы (go-zero): cmd/<name>/{main.go,etc/<name>.yaml}, internal/<name>, tests/<name>, gen/
-  services/python/       # uv-workspace: common/ (каркас + gen/), telegram/
+  services/go/           # Go-сервисы (go-zero): cmd/<name>/{main.go,etc/<name>.yaml}, internal/<name>/{transport,service,store}, tests/<name>, gen/
+  services/python/       # uv-workspace: common/ (каркас + gen/), telegram/ (<name>_service/{servicer,service,clients/})
 enviropment/             # git submodule
   docker-compose.yml     # база + include: services/*.yml
   docker-compose.dev.yml # dev: volume, xdebug, порты, grafana/prometheus/jaeger
@@ -106,6 +106,7 @@ make deploy             # прод: код + .env + compose up (то же дел
 | `domain` | домен | Traefik-роутеры (`api.`, `traefik.`, `grafana.`, …, `mail.`), `PUBLIC_API_URL`, CORS в core, `SMTP_FROM`, ACME-email, `make cert`, `make load` |
 | `app_name` | имя продукта для людей | тема писем auth (`APP_NAME`), `NEXT_PUBLIC_APP_NAME` во фронте |
 | `project_name` | техническое имя | docker-сеть, имена образов `<project_name>/core`, папка деплоя `/opt/<project_name>`, `make new-service` |
+| `metrika_id` | номер счётчика Яндекс Метрики (только `prod.yml`; пусто — счётчик не подключается) | `METRIKA_ID` → `NEXT_PUBLIC_METRIKA_ID` во фронте (build-arg, нужен ребилд образа) |
 
 ```yaml
 # текущие значения
@@ -306,9 +307,9 @@ GET  /api/me  (core)                   Bearer → 200 {id,email}
 
 `JWT_SECRET` (group_vars `jwt_secret`, prod — vault) общий для auth и core, **не короче 32 байт**. SMTP — `smtp_*` в group_vars (локально — Mailpit).
 
-Метрики — в общий стек: Prometheus скрейпит `auth:9091` (`enviropment/prometheus/prometheus.yml`), трейсы — в Jaeger (`Telemetry` в `etc/auth.yaml`), дашборд **Auth** в Grafana ставится provisioning'ом (`enviropment/grafana/provisioning/dashboards/auth.json`): RPS, p95, 5xx, регистрации/логины/блокировки в час, отказы по причине, SMTP. Свои метрики (`internal/auth/metrics.go`): `auth_operations_total{op,result}` (result = `ok` | код ошибки из `common.yaml` | `internal`), `auth_operation_duration_ms{op}`, `auth_mail_total{purpose,result}`, `auth_mail_duration_ms{purpose}`; HTTP-метрики `http_server_requests_*` снимает сам go-zero.
+Метрики — в общий стек: Prometheus скрейпит `auth:9091` (`enviropment/prometheus/prometheus.yml`), трейсы — в Jaeger (`Telemetry` в `etc/auth.yaml`), дашборд **Auth** в Grafana ставится provisioning'ом (`enviropment/grafana/provisioning/dashboards/auth.json`): RPS, p95, 5xx, регистрации/логины/блокировки в час, отказы по причине, SMTP. Свои метрики (`internal/auth/service/metrics.go`): `auth_operations_total{op,result}` (result = `ok` | код ошибки из `common.yaml` | `internal`), `auth_operation_duration_ms{op}`, `auth_mail_total{purpose,result}`, `auth_mail_duration_ms{purpose}`; HTTP-метрики `http_server_requests_*` снимает сам go-zero.
 
-Код сервиса — линейный, без слоёв: `internal/auth/{routes,handler,service,store*,token,mailer}.go`; интерфейсы только у хранилищ и почты (ради in-memory в тестах). Новый HTTP-сервис — по образцу auth (генератор `make new-service` — для gRPC).
+Код сервиса — по слоям `internal/auth/`: `transport/` (HTTP: `http.go`, `routes.go`, `errors.go`) → `service/` (use-cases, `errors.go`, `token.go`, `password.go`, `metrics.go`; интерфейс `Mailer`) → `store/` (модели, интерфейсы хранилищ, `gorm.go`/`redis.go`/`memory.go`); `adapter/smtp.go` — SMTP-реализация `Mailer`; `config.go` и `cmd/auth/main.go` — только композиция. Новый HTTP-сервис — по образцу auth (генератор `make new-service` — для gRPC).
 
 ## Новый микросервис
 
@@ -320,8 +321,38 @@ make new-service NAME=media
 подключает его в compose и Prometheus, добавляет `MEDIA_GRPC_ADDR` и `MEDIA_REPLICAS` в настройки, в core — порт `Media/Application/Port/MediaGateway`,
 адаптер `Infrastructure/Grpc/GrpcMediaGateway` (на `GrpcGateway`) и фейк в `tests/Fake`, генерирует код. Остаётся описать реальные RPC.
 
-Python-сервис: скопировать `services/python/telegram/`, добавить в `members` корневого `pyproject.toml`,
-`uv lock`, создать `enviropment/services/<name>.yml` по образцу `telegram.yml` (`args.SERVICE: <name>`).
+Go-код — сразу по слоям (`internal/media/{config.go,transport/grpc.go,service/service.go}`, `tests/media/`) плюс правило depguard в `.golangci.yml`; слои проверяет `go test ./tests/architecture/...`.
+
+Python-сервис: скопировать `services/python/telegram/` (`<name>_service/{server,settings,servicer,service,clients/}` + `tests/`), добавить в `members` корневого `pyproject.toml`,
+в `[tool.importlinter]` — пакет в `root_packages` и два контракта по образцу telegram, `uv lock`, создать `enviropment/services/<name>.yml` по образцу `telegram.yml` (`args.SERVICE: <name>`).
+
+## Архитектура кода
+
+У каждого языка — одна фиксированная структура: папки, слои, нейминг. Полные правила со сценариями — спеки `openspec/specs/`, они же — контекст для проектирования в OpenSpec (`/opsx:propose`).
+
+| Язык | Спека | Слои (зависимости только вниз) | Проверка |
+| --- | --- | --- | --- |
+| Symfony core | `architecture-core` | `Presentation/Http → Application/{Command,Query,Port,EventSubscriber} → Domain/{Model,ValueObject,Event,Repository,Exception}`; `Infrastructure/<Tech>/<Tech>*` реализует порты и репозитории | deptrac (слои), `tests/Architecture/ContextIsolationTest` (контексты), `tests/Architecture/NamingConventionTest` (папки, имена, наличие тестов) |
+| Go | `architecture-go-service` | `internal/<name>/transport → service → store`, `adapter/` — внешние системы, `config.go` + `cmd/<name>/main.go` — композиция; тесты только в `tests/<name>/` | `tests/architecture/layers_test.go` (парсит импорты всех сервисов), depguard в `.golangci.yml` |
+| Python | `architecture-python-service` | `<name>_service/servicer → service → clients/`; `service` — без grpc и pb, порты — `Protocol` | `import-linter` (`uv run lint-imports`, контракты в `pyproject.toml`) |
+
+Все проверки входят в `make test` и CI сабмодуля `backend`.
+
+**Перед кодом — проектирование** (`openspec/specs/design-process`): в `design.md` каждого change обязательна секция «Паттерны» — для новых структур паттерн из каталога GoF с обоснованием и альтернативой (или «без паттерна — почему») и размещение файлов по слоям. Каталог — скилл `gof-design-patterns`, ставится локально:
+
+```bash
+pnpm dlx skills add markpitt/claude-skills --skill gof-design-patterns   # → .agents/skills/ (в репо не идёт)
+```
+
+### Граф кода (archviz)
+
+Связанность кода можно посмотреть, а не вычитывать из импортов: `make archviz` (стек должен быть поднят, `make dev`) строит графы и открывает их на `https://arch.<domain>` (хост входит в `make cert`):
+
+- **core** — слои и контексты (deptrac → svg), отчёт phpmetrics: связанность классов, сложность, граф зависимостей;
+- **Go** — граф пакетов модуля (goda), граф вызовов по каждому `cmd/<name>` (go-callvis, без stdlib);
+- **Python** — граф модулей по каждому сервису (pydeps).
+
+Только dev: сервисы `archviz-render` (образ `enviropment/archviz/`) и `archviz` (nginx) живут под профилем `archviz` в `docker-compose.dev.yml` и не поднимаются в `make dev`. Результат — статические svg/html в `var/archviz/` (в git не идёт); упавший генератор помечается на индексе с логом, остальные графы собираются. Новые сервисы подхватываются автоматически (`cmd/*`, `members`).
 
 ## Тесты и CI
 
@@ -330,7 +361,7 @@ Python-сервис: скопировать `services/python/telegram/`, доб�
 | Слой | Ловит | Где | Локально |
 | --- | --- | --- | --- |
 | Контракты | несовместимое изменение proto; OpenAPI невалиден или Go-типы не перегенерированы; маршруты auth ≠ спека | `backend` ci → `proto` (buf lint/format/breaking против `main`), `go` (oapi-codegen diff, `tests/auth/openapi_test.go`) | `make proto-lint`, `make proto-breaking`, `make openapi` |
-| Архитектура | нарушение слоёв DDD; контекст импортирует другой контекст (связь — только через события); запрещённые импорты в Go | deptrac + `tests/Architecture/ContextIsolationTest` (PHP), depguard в golangci-lint (Go) | `make core-lint`, `make core-test`, `golangci-lint run` |
+| Архитектура | нарушение слоёв DDD; контекст импортирует другой контекст (связь — только через события); папки/имена не по спеке; слои Go (`transport → service → store`), сервис импортирует сервис; слои Python (`servicer → service → clients`), grpc в use-cases | deptrac + `tests/Architecture/{ContextIsolationTest,NamingConventionTest}` (PHP), `tests/architecture` + depguard (Go), import-linter (Python) | `make core-lint`, `make core-test`, `go test ./tests/architecture/...`, `golangci-lint run`, `uv run lint-imports` |
 | Статика | типы, стиль | phpstan 8 + cs-fixer, `go vet` + golangci-lint, ruff | `make test` |
 | Unit / интеграция | логика хендлеров; HTTP → шина → хендлер с in-memory портами (gRPC подменён, кеш — array); ядро core: публикация событий из `save()`, `EventBus` → подписчик, формат ошибок `ApiExceptionListener`, `GrpcGateway`; auth: service/handler на in-memory хранилищах, ответы сверяются со схемами OpenAPI, контрактные тесты хранилищ (miniredis; GORM — на MySQL из CI, локально `AUTH_TEST_MYSQL_DSN`) | `backend` ci → `php`/`go`/`python` | `make test` |
 | Окружение | compose dev/prod, Dockerfile'ы (hadolint), Ansible (syntax + lint + рендер `.env`) | `enviropment` ci | `docker compose config` |
@@ -358,6 +389,19 @@ E2E в CI собирает образы через `docker buildx bake` с GHA-�
 Следующие ступени, когда один сервер перестанет хватать: вынести MySQL/Redis/RabbitMQ на отдельные машины
 (в `.env` это просто другие хосты), и перейти с compose на Swarm/K8s — контракты, образы и
 структура сервисов при этом не меняются.
+
+## Спеки (OpenSpec)
+
+Изменения побольше одного коммита проходят через [OpenSpec](https://github.com/Fission-AI/OpenSpec): `openspec/specs/` — текущее поведение системы по доменам, `openspec/changes/<name>/` — предложение (`proposal → specs → design → tasks`), после реализации архивируется и вливается в `specs/`.
+Контекст проекта и правила артефактов — `openspec/config.yaml`; команды Claude Code — `.claude/commands/opsx/*`.
+
+```bash
+pnpm add -g @fission-ai/openspec@latest   # один раз
+/opsx:propose "идея"                      # в Claude Code: proposal + specs + design + tasks
+/opsx:apply                               # реализовать по tasks
+/opsx:archive                             # влить дельты в openspec/specs/
+openspec list && openspec validate --all  # что в работе, всё ли валидно
+```
 
 ## Лицензия
 
